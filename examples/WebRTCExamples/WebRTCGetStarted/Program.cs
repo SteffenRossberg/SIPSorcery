@@ -34,7 +34,7 @@ namespace demo
     class Program
     {
         private const int WEBSOCKET_PORT = 8081;
-        private const string STUN_URL = "stun:stun.sipsorcery.com";
+        private const string STUN_URL = "stun:stun.cloudflare.com";
 
         private static Microsoft.Extensions.Logging.ILogger logger = NullLogger.Instance;
 
@@ -69,7 +69,8 @@ namespace demo
         {
             RTCConfiguration config = new RTCConfiguration
             {
-                iceServers = new List<RTCIceServer> { new RTCIceServer { urls = STUN_URL } }
+                iceServers = new List<RTCIceServer> { new RTCIceServer { urls = STUN_URL } },
+                //X_BindAddress = IPAddress.Any
             };
             var pc = new RTCPeerConnection(config);
 
@@ -88,6 +89,19 @@ namespace demo
 
             pc.OnVideoFormatsNegotiated += (formats) => videoEncoderEndPoint.SetVideoSourceFormat(formats.First());
             pc.OnAudioFormatsNegotiated += (formats) => audioSource.SetAudioSourceFormat(formats.First());
+            pc.onsignalingstatechange += () =>
+            {
+                logger.LogDebug($"Signalling state change to {pc.signalingState}.");
+
+                if (pc.signalingState == RTCSignalingState.have_local_offer)
+                {
+                    logger.LogDebug($"Local SDP offer:\n{pc.localDescription.sdp}");
+                }
+                else if (pc.signalingState == RTCSignalingState.stable)
+                {
+                    logger.LogDebug($"Remote SDP offer:\n{pc.remoteDescription.sdp}");
+                }
+            };
             
             pc.onconnectionstatechange += async (state) =>
             {

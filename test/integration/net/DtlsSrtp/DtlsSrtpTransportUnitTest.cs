@@ -12,8 +12,10 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using System;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Org.BouncyCastle.Tls.Crypto.Impl.BC;
 using Xunit;
 
 namespace SIPSorcery.Net.IntegrationTests
@@ -34,11 +36,12 @@ namespace SIPSorcery.Net.IntegrationTests
         [Fact]
         public void CreateClientInstanceUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            (var tlsCert, var pvtKey) = DtlsUtils.CreateSelfSignedTlsCert();
-            DtlsSrtpTransport dtlsTransport = new DtlsSrtpTransport(new DtlsSrtpClient(tlsCert, pvtKey));
+            var crypto = new BcTlsCrypto();
+            (var tlsCert, var pvtKey) = DtlsUtils.CreateSelfSignedTlsCert(crypto);
+            DtlsSrtpTransport dtlsTransport = new DtlsSrtpTransport(new DtlsSrtpClient(crypto, tlsCert, pvtKey));
 
             Assert.NotNull(dtlsTransport);
         }
@@ -49,10 +52,10 @@ namespace SIPSorcery.Net.IntegrationTests
         [Fact]
         public void CreateServerInstanceUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            DtlsSrtpTransport dtlsTransport = new DtlsSrtpTransport(new DtlsSrtpServer());
+            DtlsSrtpTransport dtlsTransport = new DtlsSrtpTransport(new DtlsSrtpServer(new BcTlsCrypto()));
 
             Assert.NotNull(dtlsTransport);
         }
@@ -62,13 +65,13 @@ namespace SIPSorcery.Net.IntegrationTests
         /// handshake successfully.
         /// </summary>
         [Fact]
-        public void DoHandshakeUnitTest()
+        public async Task DoHandshakeUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            var dtlsClient = new DtlsSrtpClient();
-            var dtlsServer = new DtlsSrtpServer();
+            var dtlsClient = new DtlsSrtpClient(new BcTlsCrypto());
+            var dtlsServer = new DtlsSrtpServer(new BcTlsCrypto());
 
             DtlsSrtpTransport dtlsClientTransport = new DtlsSrtpTransport(dtlsClient);
             dtlsClientTransport.TimeoutMilliseconds = 5000;
@@ -77,27 +80,32 @@ namespace SIPSorcery.Net.IntegrationTests
 
             dtlsClientTransport.OnDataReady += (buf) =>
             {
-                logger.LogDebug($"DTLS client transport sending {buf.Length} bytes to server.");
+                logger.LogDebug("DTLS client transport sending {BufferLength} bytes to server.", buf.Length);
                 dtlsServerTransport.WriteToRecvStream(buf);
             };
             dtlsServerTransport.OnDataReady += (buf) =>
             {
-                logger.LogDebug($"DTLS server transport sending {buf.Length} bytes to client.");
+                logger.LogDebug("DTLS server transport sending {BufferLength} bytes to client.", buf.Length);
                 dtlsClientTransport.WriteToRecvStream(buf);
             };
 
             var serverTask = Task.Run<bool>(() => dtlsServerTransport.DoHandshake(out _));
             var clientTask = Task.Run<bool>(() => dtlsClientTransport.DoHandshake(out _));
 
-            bool didComplete = Task.WaitAll(new Task[] { serverTask, clientTask }, 5000);
+            var timeoutTask = Task.Delay(TimeSpan.FromMilliseconds(5000));
+            var winner = await Task.WhenAny(serverTask, clientTask, timeoutTask);
 
-            Assert.True(didComplete);
-            Assert.True(serverTask.Result);
-            Assert.True(clientTask.Result);
+            if (winner == timeoutTask)
+            {
+                Assert.Fail($"Test timed out after 5000ms.");
+            }
 
-            logger.LogDebug($"DTLS client fingerprint       : {dtlsClient.Fingerprint}.");
+            Assert.True(await serverTask);
+            Assert.True(await clientTask);
+
+            logger.LogDebug("DTLS client fingerprint       : {Fingerprint}", dtlsServer.Fingerprint);
             //logger.LogDebug($"DTLS client server fingerprint: {dtlsClient.ServerFingerprint}.");
-            logger.LogDebug($"DTLS server fingerprint       : {dtlsServer.Fingerprint}.");
+            logger.LogDebug("DTLS server fingerprint       : {Fingerprint}", dtlsServer.Fingerprint);
             //logger.LogDebug($"DTLS server client fingerprint: {dtlsServer.ClientFingerprint}.");
 
             Assert.NotNull(dtlsClient.GetRemoteCertificate());
@@ -112,12 +120,12 @@ namespace SIPSorcery.Net.IntegrationTests
         /// Tests that attempting a client handshake times out correctly.
         /// </summary>
         [Fact]
-        public async void DoHandshakeClientTimeoutUnitTest()
+        public async Task DoHandshakeClientTimeoutUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            DtlsSrtpTransport dtlsClientTransport = new DtlsSrtpTransport(new DtlsSrtpClient());
+            DtlsSrtpTransport dtlsClientTransport = new DtlsSrtpTransport(new DtlsSrtpClient(new BcTlsCrypto()));
             dtlsClientTransport.TimeoutMilliseconds = 2000;
 
             var result = await Task.Run<bool>(() => dtlsClientTransport.DoHandshake(out _));
@@ -129,12 +137,12 @@ namespace SIPSorcery.Net.IntegrationTests
         /// Tests that attempting a server handshake times out correctly.
         /// </summary>
         [Fact]
-        public async void DoHandshakeServerTimeoutUnitTest()
+        public async Task DoHandshakeServerTimeoutUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            DtlsSrtpTransport dtlsServerTransport = new DtlsSrtpTransport(new DtlsSrtpServer());
+            DtlsSrtpTransport dtlsServerTransport = new DtlsSrtpTransport(new DtlsSrtpServer(new BcTlsCrypto()));
             dtlsServerTransport.TimeoutMilliseconds = 2000;
 
             var result = await Task.Run<bool>(() => dtlsServerTransport.DoHandshake(out _));

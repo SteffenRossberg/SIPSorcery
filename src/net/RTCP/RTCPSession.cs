@@ -59,8 +59,7 @@ namespace SIPSorcery.Net
         private const float RTCP_INTERVAL_LOW_RANDOMISATION_FACTOR = 0.5F;
         private const float RTCP_INTERVAL_HIGH_RANDOMISATION_FACTOR = 1.5F;
         private const int NO_ACTIVITY_TIMEOUT_FACTOR = 6;
-        private const int NO_ACTIVITY_TIMEOUT_MILLISECONDS = NO_ACTIVITY_TIMEOUT_FACTOR * RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS;
-
+        
         private static ILogger logger = Log.Logger;
 
         private static DateTime UtcEpoch2036 = new DateTime(2036, 2, 7, 6, 28, 16, DateTimeKind.Utc);
@@ -84,13 +83,21 @@ namespace SIPSorcery.Net
         /// <summary>
         /// Timestamp that the RTCP session sender report scheduler was started at.
         /// </summary>
-        public DateTime StartedAt { get; private set; }
+        public DateTime StartedAt { get; private set; } = DateTime.MinValue;
 
         /// <summary>
         /// Timestamp that the last RTP or RTCP packet for was received at.
         /// </summary>
         public DateTime LastActivityAt { get; private set; } = DateTime.MinValue;
 
+        /// <summary>
+        /// Sets the timeout threshold for this session. If no RTP or RTCP packets are received
+        /// in this time period, a hangup is invoked.  It's checked every 5 seconds so the timeout
+        /// is best set to an integer multiple of that.
+        /// </summary>
+        public int NoActivityTimeoutMilliseconds { get; set; } = NO_ACTIVITY_TIMEOUT_FACTOR * RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS;
+
+        
         /// <summary>
         /// Indicates whether the session is currently in a timed out state. This
         /// occurs if no RTP or RTCP packets have been received during an expected
@@ -189,11 +196,21 @@ namespace SIPSorcery.Net
 
         public void Start()
         {
-            StartedAt = DateTime.Now;
+            if (StartedAt != DateTime.MinValue)
+            {
+                logger.LogWarning("Start was called on RTCP session for {CNameOrSsrc} but it has already been started.", !string.IsNullOrWhiteSpace(Cname) ? Cname : Ssrc.ToString());
+            }
+            else
+            {
+                logger.LogDebug("Starting RTCP session for {CNameOrSsrc}.", !string.IsNullOrWhiteSpace(Cname) ? Cname : Ssrc.ToString());
 
-            // Schedule an immediate sender report.
-            var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
-            m_rtcpReportTimer = new Timer(SendReportTimerCallback, null, interval, Timeout.Infinite);
+                StartedAt = DateTime.Now;
+
+                // Schedule an immediate sender report.
+                var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
+            m_rtcpReportTimer = new Timer(SendReportTimerCallback);
+            m_rtcpReportTimer.Change(interval, Timeout.Infinite);
+            }
         }
 
         public void Close(string reason)
@@ -218,7 +235,7 @@ namespace SIPSorcery.Net
             LastActivityAt = DateTime.Now;
             IsTimedOut = false;
             PacketsReceivedCount++;
-            OctetsReceivedCount += (uint)rtpPacket.Payload.Length;
+            OctetsReceivedCount += rtpPacket.GetPayloadLength();
 
             if (m_receptionReport == null)
             {
@@ -239,7 +256,7 @@ namespace SIPSorcery.Net
         {
             if (m_receptionReport != null && m_receptionReport.SSRC == ssrc)
             {
-                logger.LogDebug($"RTCP session removing reception report for remote ssrc {ssrc}.");
+                logger.LogDebug("RTCP session removing reception report for remote ssrc {Ssrc}.", ssrc);
                 m_receptionReport = null;
             }
         }
@@ -250,8 +267,13 @@ namespace SIPSorcery.Net
         /// </summary>
         public void RecordRtpPacketSend(RTPPacket rtpPacket)
         {
+            if(StartedAt == DateTime.MinValue)
+            {
+                Start();
+            }
+
             PacketsSentCount++;
-            OctetsSentCount += (uint)rtpPacket.Payload.Length;
+            OctetsSentCount += rtpPacket.GetPayloadLength();
             LastSeqNum = rtpPacket.Header.SequenceNumber;
             LastRtpTimestampSent = rtpPacket.Header.Timestamp;
             LastNtpTimestampSent = DateTimeToNtpTimestamp(DateTime.Now);
@@ -261,11 +283,16 @@ namespace SIPSorcery.Net
         /// Event handler for an RTCP packet being received from the remote party.
         /// </summary>
         /// <param name="remoteEndPoint">The end point the packet was received from.</param>
-        /// <param name="buffer">The data received.</param>
+        /// <param name="rtcpCompoundPacket">The data received.</param>
         public void ReportReceived(IPEndPoint remoteEndPoint, RTCPCompoundPacket rtcpCompoundPacket)
         {
             try
             {
+                if (StartedAt == DateTime.MinValue)
+                {
+                    Start();
+                }
+
                 LastActivityAt = DateTime.Now;
                 IsTimedOut = false;
 
@@ -297,7 +324,7 @@ namespace SIPSorcery.Net
             }
             catch (Exception excp)
             {
-                logger.LogError($"Exception RTCPSession.ReportReceived. {excp.Message}");
+                logger.LogError(excp, "Exception RTCPSession.ReportReceived. {ErrorMessage}", excp.Message);
             }
         }
 
@@ -313,19 +340,19 @@ namespace SIPSorcery.Net
                 {
                     lock (m_rtcpReportTimer)
                     {
-                        if ((LastActivityAt != DateTime.MinValue && DateTime.Now.Subtract(LastActivityAt).TotalMilliseconds > NO_ACTIVITY_TIMEOUT_MILLISECONDS) ||
-                            (LastActivityAt == DateTime.MinValue && DateTime.Now.Subtract(CreatedAt).TotalMilliseconds > NO_ACTIVITY_TIMEOUT_MILLISECONDS))
+                        if ((LastActivityAt != DateTime.MinValue && DateTime.Now.Subtract(LastActivityAt).TotalMilliseconds > NoActivityTimeoutMilliseconds) ||
+                            (LastActivityAt == DateTime.MinValue && DateTime.Now.Subtract(CreatedAt).TotalMilliseconds > NoActivityTimeoutMilliseconds))
                         {
                             if (!IsTimedOut)
                             {
-                                logger.LogWarning($"RTCP session for local ssrc {Ssrc} has not had any activity for over {NO_ACTIVITY_TIMEOUT_MILLISECONDS / 1000} seconds.");
+                                logger.LogWarning("RTCP session for local ssrc {Ssrc} has not had any activity for over {NoActivityTimeoutSeconds} seconds.", Ssrc, NoActivityTimeoutMilliseconds / 1000);
                                 IsTimedOut = true;
 
                                 OnTimeout?.Invoke(MediaType);
                             }
                         }
 
-                        //logger.LogDebug($"SendRtcpSenderReport ssrc {Ssrc}, last seqnum {LastSeqNum}, pkts {PacketsSentCount}, bytes {OctetsSentCount} ");
+                        //logger.LogDebug("SendRtcpSenderReport ssrc {Ssrc}, last seqnum {LastSeqNum}, pkts {PacketsSentCount}, bytes {OctetsSentCount}", Ssrc, LastSeqNum, PacketsSentCount, OctetsSentCount);
 
                         var report = GetRtcpReport();
 
@@ -336,7 +363,8 @@ namespace SIPSorcery.Net
                         var interval = GetNextRtcpInterval(RTCP_MINIMUM_REPORT_PERIOD_MILLISECONDS);
                         if (m_rtcpReportTimer == null)
                         {
-                            m_rtcpReportTimer = new Timer(SendReportTimerCallback, null, interval, Timeout.Infinite);
+                            m_rtcpReportTimer = new Timer(SendReportTimerCallback);
+                            m_rtcpReportTimer.Change(interval, Timeout.Infinite);
                         }
                         else
                         {
@@ -352,7 +380,7 @@ namespace SIPSorcery.Net
             catch (Exception excp)
             {
                 // RTCP reports are not critical enough to bubble the exception up to the application.
-                logger.LogError($"Exception SendReportTimerCallback. {excp.Message}");
+                logger.LogError(excp, "Exception SendReportTimerCallback. {ErrorMessage}", excp.Message);
                 m_rtcpReportTimer?.Dispose();
             }
         }

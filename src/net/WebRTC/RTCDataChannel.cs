@@ -16,7 +16,6 @@
 
 using System;
 using System.Text;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 
@@ -90,6 +89,7 @@ namespace SIPSorcery.Net
             _transport = transport;
 
             if (init == null) {
+                ordered = true;
                 return;
             }
             // TODO: Utilize ordered, maxPacketLifeTime, maxRetransmits, and protocol;
@@ -103,7 +103,7 @@ namespace SIPSorcery.Net
 
         internal void GotAck()
         {
-            logger.LogDebug($"Data channel for label {label} now open.");
+            logger.LogDebug("Data channel for label {label} now open.", label);
             IsOpened = true;
             readyState = RTCDataChannelState.open;
             onopen?.Invoke();
@@ -122,7 +122,7 @@ namespace SIPSorcery.Net
         {
             IsOpened = false;
             readyState = RTCDataChannelState.closed;
-            logger.LogDebug($"Data channel with id {id} has been closed");
+            logger.LogDebug("Data channel with id {id} has been closed", id);
             onclose?.Invoke();
         }
 
@@ -139,7 +139,7 @@ namespace SIPSorcery.Net
             }
             else if (_transport.state != RTCSctpTransportState.Connected)
             {
-                logger.LogWarning($"WebRTC data channel send failed due to SCTP transport in state {_transport.state}.");
+                logger.LogWarning("WebRTC data channel send failed due to SCTP transport in state {TransportState}.", _transport.state);
             }
             else
             {
@@ -174,7 +174,7 @@ namespace SIPSorcery.Net
             }
             else if (_transport.state != RTCSctpTransportState.Connected)
             {
-                logger.LogWarning($"WebRTC data channel send failed due to SCTP transport in state {_transport.state}.");
+                logger.LogWarning("WebRTC data channel send failed due to SCTP transport in state {TransportState}.", _transport.state);
             }
             else
             {

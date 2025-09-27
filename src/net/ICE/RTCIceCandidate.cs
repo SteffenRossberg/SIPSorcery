@@ -19,9 +19,7 @@
 //-----------------------------------------------------------------------------
 
 using System;
-using System.Linq;
 using System.Net;
-using SIPSorcery.Sys;
 
 namespace SIPSorcery.Net
 {
@@ -284,7 +282,7 @@ namespace SIPSorcery.Net
                 string candidateStr;
                 if (protocol == RTCIceProtocol.tcp)
                 {
-                    candidateStr = String.Format("{0} {1} udp {2} {3} {4} typ {5} tcptype {6} raddr {7} rport {8} generation 0",
+                    candidateStr = String.Format("{0} {1} tcp {2} {3} {4} typ {5} tcptype {6} raddr {7} rport {8} generation 0",
                         foundation,
                         component.GetHashCode(),
                         priority,
@@ -396,7 +394,7 @@ namespace SIPSorcery.Net
         /// protocol and IP end point. Primary use case is to check whether a candidate
         /// is a match for a remote end point that a message has been received from.
         /// </summary>
-        /// <param name="epProtocol">The protocol to check equivalence for.</param>
+        /// <param name="epPotocol">The protocol to check equivalence for.</param>
         /// <param name="ep">The IP end point to check equivalence for.</param>
         /// <returns>True if the candidate is deemed equivalent or false if not.</returns>
         public bool IsEquivalentEndPoint(RTCIceProtocol epPotocol, IPEndPoint ep)

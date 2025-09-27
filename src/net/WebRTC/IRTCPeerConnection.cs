@@ -44,6 +44,12 @@ namespace SIPSorcery.Net
         /// and will be added to the offer SDP.
         /// </summary>
         public bool X_ExcludeIceCandidates;
+
+        /// <summary>
+        /// If set to true it indicates the generation of the SDP offer should wait until the ICE gathering
+        /// is compelte so the ICE cnadidates can be included in the SDP offer.
+        /// </summary>
+        public bool X_WaitForIceGatheringToComplete;
     }
 
     /// <summary>
@@ -54,6 +60,7 @@ namespace SIPSorcery.Net
     /// </remarks>
     public class RTCAnswerOptions
     {
+        /// <summary>
         /// If set it indicates that any available ICE candidates should NOT be added
         /// to the offer SDP. By default "host" candidates should always be available
         /// and will be added to the offer SDP.
@@ -90,6 +97,19 @@ namespace SIPSorcery.Net
         public string username;
         public RTCIceCredentialType credentialType;
         public string credential;
+
+        public static RTCIceServer Parse(string iceServer)
+        {
+            var fields = iceServer.Split(';');
+
+            return new RTCIceServer
+            {
+                urls = fields[0],
+                username = fields.Length > 1 ? fields[1] : null,
+                credential = fields.Length > 2 ? fields[2] : null,
+                credentialType = RTCIceCredentialType.password
+            };
+        }
     }
 
     /// <summary>
@@ -222,7 +242,7 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    return Certificate.NotAfter.GetEpoch();
+                    return Certificate.NotAfter.ToUnixTime();
                 }
             }
         }
@@ -231,7 +251,7 @@ namespace SIPSorcery.Net
 
         public List<RTCDtlsFingerprint> getFingerprints()
         {
-            return new List<RTCDtlsFingerprint> { DtlsUtils.Fingerprint(Certificate) };
+            return new List<RTCDtlsFingerprint> { DtlsUtils.Fingerprint(Org.BouncyCastle.Security.DotNetUtilities.FromX509Certificate(Certificate)) };
         }
     }
 
@@ -260,7 +280,7 @@ namespace SIPSorcery.Net
                 }
                 else
                 {
-                    return Certificate.NotAfter.GetEpoch();
+                    return Certificate.NotAfter.ToUnixTime();
                 }
             }
         }
@@ -287,9 +307,6 @@ namespace SIPSorcery.Net
         public RTCIceTransportPolicy iceTransportPolicy;
         public RTCBundlePolicy bundlePolicy;
         public RTCRtcpMuxPolicy rtcpMuxPolicy;
-#pragma warning disable CS0618 // Type or member is obsolete
-        public List<RTCCertificate> certificates;
-#pragma warning restore CS0618 // Type or member is obsolete
         public List<RTCCertificate2> certificates2;
 
         /// <summary>
@@ -338,6 +355,17 @@ namespace SIPSorcery.Net
         /// the destination address
         /// </summary>
         public bool X_ICEIncludeAllInterfaceAddresses;
+
+        /// <summary>
+        /// Set to true to use the RSA key in the certificate for the DTLS handshake. The default
+        /// is to use ECDSA. Chrome has defaulted to ECDSA since 2016 (see https://developer.chrome.com/blog/webrtc-ecdsa).
+        /// </summary>
+        public bool X_UseRsaForDtlsCertificate;
+
+        /// <summary>
+        /// Timeout for gathering local IP addresses
+        /// </summary>
+        public int X_GatherTimeoutMs = 30000;
     }
 
     /// <summary>

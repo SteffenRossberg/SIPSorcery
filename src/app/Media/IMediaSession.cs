@@ -14,7 +14,6 @@
 //-----------------------------------------------------------------------------
 
 using System;
-using System.Collections.Generic;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,6 +40,11 @@ namespace SIPSorcery.SIP.App
     /// </summary>
     public interface IMediaSession
     {
+        /// <summary>
+        /// Indicates whether the session supports real time text. 
+        /// </summary>
+        bool HasText { get; }
+
         /// <summary>
         /// Indicates whether the session supports audio.
         /// </summary>
@@ -94,7 +98,7 @@ namespace SIPSorcery.SIP.App
         /// as the Connection address in the SDP offer. If not set an attempt will be 
         /// made to determine the best matching address.</param>
         /// <returns>A new SDP offer representing the session's local media tracks.</returns>
-        SDP CreateOffer(IPAddress connectionAddress);
+        SDP CreateOffer(IPAddress connectionAddress = null);
 
         /// <summary>
         /// Sets the remote description. Calling this method can result in the local
@@ -102,7 +106,7 @@ namespace SIPSorcery.SIP.App
         /// if they are.
         /// </summary>
         /// <param name="sdpType">Whether the SDP being set is an offer or answer.</param>
-        /// <param name="sdp">The SDP description from the remote party.</param>
+        /// <param name="sessionDescription">The SDP description from the remote party.</param>
         /// <returns>If successful an OK enum result. If not an enum result indicating the 
         /// failure cause.</returns>
         SetDescriptionResultEnum SetRemoteDescription(SdpType sdpType, SDP sessionDescription);
@@ -118,7 +122,7 @@ namespace SIPSorcery.SIP.App
         /// from the remote offer.</param>
         /// <returns>An SDP answer matching the offer and the local media tracks contained
         /// in the session.</returns>
-        SDP CreateAnswer(IPAddress connectionAddress);
+        SDP CreateAnswer(IPAddress connectionAddress = null);
 
         /// <summary>
         /// Needs to be called prior to sending media. Performs any set up tasks such as 

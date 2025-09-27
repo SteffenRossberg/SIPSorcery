@@ -9,10 +9,12 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using System.ComponentModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
+using Org.BouncyCastle.Ocsp;
 using SIPSorcery.Sys;
 using Xunit;
 
@@ -36,7 +38,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseAsteriskTRYINGUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -63,7 +65,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseAsteriskOKUnitTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -108,7 +110,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseOptionsBodyResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg = "SIP/2.0 200 OK" + m_CRLF +
@@ -145,7 +147,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseForbiddenResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg = "SIP/2.0 403 Forbidden" + m_CRLF +
@@ -170,7 +172,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseOptionsResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -209,7 +211,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseMissingCSeqOptionsResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -226,8 +228,8 @@ namespace SIPSorcery.SIP.UnitTests
             SIPMessageBuffer sipMessageBuffer = SIPMessageBuffer.ParseSIPMessage(Encoding.UTF8.GetBytes(sipMsg), null, null);
             SIPResponse optionsResp = SIPResponse.ParseSIPResponse(sipMessageBuffer);
 
-            logger.LogDebug("CSeq=" + optionsResp.Header.CSeq + ".");
-            logger.LogDebug("CSeq Method=" + optionsResp.Header.CSeqMethod + ".");
+            logger.LogDebug("CSeq={CSeq}.", optionsResp.Header.CSeq);
+            logger.LogDebug("CSeq Method={CSeqMethod}.", optionsResp.Header.CSeqMethod);
 
             Assert.True(optionsResp.Header.CSeq == -1, "Response CSeq was incorrect.");
             Assert.True(optionsResp.Header.CSeqMethod == SIPMethodsEnum.NONE, "Response CSeq method was incorrect.");
@@ -238,7 +240,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseMSCOkResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -270,7 +272,7 @@ namespace SIPSorcery.SIP.UnitTests
             SIPMessageBuffer sipMessageBuffer = SIPMessageBuffer.ParseSIPMessage(Encoding.UTF8.GetBytes(sipMsg), null, null);
             SIPResponse okResp = SIPResponse.ParseSIPResponse(sipMessageBuffer);
 
-            logger.LogDebug("To: " + okResp.Header.To.ToString());
+            logger.LogDebug("To: {ToHeader}", okResp.Header.To.ToString());
 
             Assert.True(SIPResponseStatusCodesEnum.Ok == okResp.Status, "Response should have been ok.");
             Assert.True("127.0.0.1" == okResp.Header.To.ToURI.Host, "To URI host was not parsed correctly.");
@@ -281,7 +283,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseMultipleContactsResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -298,7 +300,7 @@ namespace SIPSorcery.SIP.UnitTests
             SIPMessageBuffer sipMessageBuffer = SIPMessageBuffer.ParseSIPMessage(Encoding.UTF8.GetBytes(sipMsg), null, null);
             SIPResponse okResp = SIPResponse.ParseSIPResponse(sipMessageBuffer);
 
-            logger.LogDebug("To: " + okResp.Header.To.ToString());
+            logger.LogDebug("To: {ToHeader}", okResp.Header.To.ToString());
 
             Assert.True(SIPResponseStatusCodesEnum.Ok == okResp.Status, "Response should have been ok.");
             Assert.True(okResp.Header.Contact.Count == 2, "Response should have had two contacts.");
@@ -315,7 +317,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseMultiLineRecordRouteResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -351,6 +353,8 @@ namespace SIPSorcery.SIP.UnitTests
             SIPMessageBuffer sipMessageBuffer = SIPMessageBuffer.ParseSIPMessage(Encoding.UTF8.GetBytes(sipMsg), null, null);
             SIPResponse okResp = SIPResponse.ParseSIPResponse(sipMessageBuffer);
 
+            logger.LogDebug("{ToResp}", okResp.ToString());
+
             Assert.True(okResp.Header.RecordRoutes.Length == 2, "The wrong number of Record-Route headers were present in the parsed response.");
             Assert.True(okResp.Header.RecordRoutes.PopRoute().ToString() == "<sip:77.75.25.44:5060;lr=on>", "The top Record-Route header was incorrect.");
             SIPRoute nextRoute = okResp.Header.RecordRoutes.PopRoute();
@@ -362,7 +366,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void ParseMultiLineViaResponse()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             string sipMsg =
@@ -409,7 +413,7 @@ namespace SIPSorcery.SIP.UnitTests
         [Fact]
         public void BinarySerialisationRoundTripTest()
         {
-            logger.LogDebug("--> " + System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
             logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
 
             SIPURI uri = new SIPURI("dummy", "dummy", null, SIPSchemesEnum.sip, SIPProtocolsEnum.udp);
@@ -426,8 +430,8 @@ namespace SIPSorcery.SIP.UnitTests
                 bodyHash = sha256.ComputeHash(resp.BodyBuffer).HexStr();
             }
 
-            logger.LogDebug(resp.ToString());
-            logger.LogDebug($"Body sha256: {bodyHash}.");
+            logger.LogDebug("{Resp}", resp.ToString());
+            logger.LogDebug("Body sha256: {bodyHash}.", bodyHash);
 
             SIPMessageBuffer msgBuffer = SIPMessageBuffer.ParseSIPMessage(resp.GetBytes(), SIPEndPoint.Empty, SIPEndPoint.Empty);
             SIPResponse rndTripResp = SIPResponse.ParseSIPResponse(msgBuffer, Encoding.UTF8, Encoding.ASCII);
@@ -438,8 +442,8 @@ namespace SIPSorcery.SIP.UnitTests
                 rndTripBodyHash = sha256.ComputeHash(rndTripResp.BodyBuffer).HexStr();
             }
 
-            logger.LogDebug(rndTripResp.ToString());
-            logger.LogDebug($"Round Trip Body sha256: {rndTripBodyHash}.");
+            logger.LogDebug("{RndTripResp}", rndTripResp.ToString());
+            logger.LogDebug("Round Trip Body sha256: {rndTripBodyHash}.", rndTripBodyHash);
 
             Assert.Equal(bodyHash, rndTripBodyHash);
         }
@@ -454,11 +458,11 @@ namespace SIPSorcery.SIP.UnitTests
             SIPRequest req = SIPRequest.GetRequest(SIPMethodsEnum.OPTIONS, uri);
             req.Header.CSeq = 0;
 
-            logger.LogDebug(req.ToString());
+            logger.LogDebug("{Req}", req.ToString());
 
             var resp = SIPResponse.GetResponse(req, SIPResponseStatusCodesEnum.Ok, null);
 
-            logger.LogDebug(resp.ToString());
+            logger.LogDebug("{Resp}", resp.ToString());
 
             Assert.Equal(0, resp.Header.CSeq);
             Assert.True(Regex.Match(resp.ToString(), "CSeq: 0 OPTIONS", RegexOptions.Multiline).Success);
@@ -489,6 +493,53 @@ namespace SIPSorcery.SIP.UnitTests
             Assert.Equal(resp.RemoteSIPEndPoint, copy.RemoteSIPEndPoint);
             Assert.Equal(resp.SendFromHintChannelID, copy.SendFromHintChannelID);
             Assert.Equal(resp.SendFromHintConnectionID, copy.SendFromHintConnectionID);
+        }
+
+        /// <summary>
+        /// Tests that a SIP response with Chinese characters can be successfully parsed. See #848.
+        /// </summary>
+        [Fact]
+        public void ChineseCharactersParseTest()
+        {
+            logger.LogDebug("--> {MethodName}", System.Reflection.MethodBase.GetCurrentMethod().Name);
+            logger.BeginScope(System.Reflection.MethodBase.GetCurrentMethod().Name);
+
+            string sipResponse =
+                "SIP/2.0 200 Ok" + m_CRLF +
+                "Via: SIP/2.0/UDP 172.17.3.2:5060; branch=z9hG4bKd9a520e54fca43438806fbdaf46e2532; rport=5060; received=172.17.3.2" + m_CRLF +
+                "To: \"被叫方名字\" <sip:5030003202@172.17.2.2;CallScope=2;CallPriority=1;tag=ENVNTODUZJ>" + m_CRLF +
+                "From: \"呼叫方名字\" <sip:57660000@172.17.2.2;tag=FLYTRWSZOS>" + m_CRLF +
+                "Call-ID: f99d53b50a254d9194381082b21af2cc" + m_CRLF +
+                "CSeq: 1 INVITE" + m_CRLF +
+                "Contact: sip: 172.17.2.2:5060" + m_CRLF +
+                "User-Agent: SCT_DSS V1.0" + m_CRLF +
+                "Server: sipsorcery_v6.0.6.5" + m_CRLF +
+                "Supported: replaces, norefersub, 100rel" + m_CRLF +
+                "Content-Type: application/sdp" + m_CRLF +
+                "Content-Length: 250" + m_CRLF +
+                m_CRLF +
+                "v=0" + m_CRLF +
+                "o=-1307081803 2 IN IP4 172.17.2.10" + m_CRLF +
+                "s=Asterisk" + m_CRLF +
+                "c=IN IP4 172.17.2.10" + m_CRLF +
+                "t=0 0" + m_CRLF +
+                "m=audio 19722 RTP/AVP 0 8 101" + m_CRLF +
+                "a=rtpmap:0 PCMU/8000" + m_CRLF +
+                "a=rtpmap:8 PCMA/8000" + m_CRLF +
+                "a=rtpmap:101 telephone-event/8000" + m_CRLF +
+                "a=fmtp:101 0-16" + m_CRLF +
+                "a=ptime:20" + m_CRLF +
+                "a=maxptime:150" + m_CRLF +
+                "a=sendrecv" + m_CRLF;
+
+            SIPMessageBuffer sipMessageBuffer = SIPMessageBuffer.ParseSIPMessage(Encoding.UTF8.GetBytes(sipResponse), null, null);
+            SIPResponse okResp = SIPResponse.ParseSIPResponse(sipMessageBuffer);
+
+            logger.LogDebug("{OkResp}", okResp.ToString());
+
+            Assert.Equal("呼叫方名字", okResp.Header.From.FromName);
+            Assert.Equal("被叫方名字", okResp.Header.To.ToName);
+            Assert.StartsWith("v=", okResp.Body);
         }
     }
 

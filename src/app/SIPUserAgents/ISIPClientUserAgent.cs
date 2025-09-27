@@ -37,6 +37,7 @@ namespace SIPSorcery.SIP.App
 
         SIPRequest Call(SIPCallDescriptor sipCallDescriptor);
         SIPRequest Call(SIPCallDescriptor sipCallDescriptor, SIPEndPoint serverEndPoint);
-        void Cancel();
+        void AckAnswer(SIPResponse sipResponse, string content, string contentType);
+        void Cancel(string reason = null);
     }
 }

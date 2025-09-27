@@ -19,6 +19,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using SIPSorcery.Sys;
 
@@ -107,7 +108,7 @@ namespace SIPSorcery.Net
         /// The end point for this STUN or TURN server. Will be set asynchronously once
         /// any required DNS lookup completes.
         /// </summary>
-        internal IPEndPoint ServerEndPoint { get; set; }
+        public IPEndPoint ServerEndPoint { get; set; }
 
         /// <summary>
         /// The transaction ID to use in STUN requests. It is used to match responses
@@ -151,7 +152,7 @@ namespace SIPSorcery.Net
         /// If the initial Binding (for STUN) or Allocate (for TURN) connection check is successful 
         /// this will hold the resultant server reflexive transport address.
         /// </summary>
-        internal IPEndPoint ServerReflexiveEndPoint { get; set; }
+        public IPEndPoint ServerReflexiveEndPoint { get; set; }
 
         /// <summary>
         /// If the ICE server being checked is a TURN one and the Allocate request is successful this
@@ -179,6 +180,13 @@ namespace SIPSorcery.Net
 
         public ProtocolType Protocol { get { return _uri.Protocol; } }
 
+        public STUNUri Uri { get { return _uri; } }
+
+        /// <summary>
+        /// Task that completes when this server is done (resolved or timed out).
+        /// </summary>
+        internal Task DnsResolutionTask { get; set; }
+
         /// <summary>
         /// Default constructor.
         /// </summary>
@@ -195,6 +203,116 @@ namespace SIPSorcery.Net
             _username = username;
             _password = password;
             GenerateNewTransactionID();
+        }
+
+        /// <summary>
+        /// Parses a semicolon-delimited ICE server string into an RTCIceServer instance.
+        /// Expected format:
+        /// urls[;username[;credential]]
+        /// Examples:
+        /// "stun:stun.example.com:3478"
+        /// "turn:turn.example.com?transport=tcp;user1;pass1"
+        /// "stun:stun1.example.com,stun:stun2.example.com"
+        /// Notes:
+        /// - Whitespace is trimmed.
+        /// - Surrounding quotes are removed from fields.
+        /// - If multiple URLs are provided in the first field (comma or whitespace separated),
+        ///   the first non-empty URL is used.
+        /// - If the URL lacks a scheme (e.g. "example.com:3478"), a stun: scheme will be assumed.
+        /// </summary>
+        /// <param name="iceServer">The ICE server string to parse. Format: "urls[;username[;credential]]".</param>
+        /// <returns>An IceServer configured with the parsed values.</returns>
+        /// <exception cref="ArgumentNullException">Thrown if iceServer is null.</exception>
+        /// <exception cref="ArgumentException">Thrown if iceServer is empty or the URL is invalid.</exception>
+        public static IceServer ParseIceServer(string iceServer)
+        {
+            if (iceServer == null)
+            {
+                throw new ArgumentNullException(nameof(iceServer));
+            }
+
+            iceServer = iceServer.Trim();
+            if (iceServer.Length == 0)
+            {
+                throw new ArgumentException("ICE server string cannot be empty.", nameof(iceServer));
+            }
+
+            var fields = iceServer.Split([';'], StringSplitOptions.None);
+
+            string Unquote(string s)
+            {
+                if (string.IsNullOrEmpty(s))
+                {
+                    return s;
+                }
+
+                s = s.Trim();
+                if (s.Length >= 2)
+                {
+                    if ((s[0] == '"' && s[s.Length - 1] == '"') ||
+                        (s[0] == '\'' && s[s.Length - 1] == '\''))
+                    {
+                        return s.Substring(1, s.Length - 2);
+                    }
+                }
+                return s;
+            }
+
+            // urls (required)
+            string urlsFieldRaw = fields.Length > 0 ? Unquote(fields[0]) : null;
+            if (string.IsNullOrWhiteSpace(urlsFieldRaw))
+            {
+                throw new ArgumentException("ICE server value must include a STUN/TURN URL in the first field.", nameof(iceServer));
+            }
+
+            // If multiple URLs are provided, take the first non-empty candidate.
+            // Split on comma or whitespace.
+            var urlCandidates = urlsFieldRaw.Split([ ',', ' '], StringSplitOptions.RemoveEmptyEntries)
+                                            .Select(u => u.Trim())
+                                            .ToArray();
+
+            string selectedUrl = urlCandidates.Length > 0 ? urlCandidates[0] : urlsFieldRaw.Trim();
+
+            // Try validate; if it fails, try auto-prefixing stun:
+            bool isValid = STUNUri.TryParse(selectedUrl, out var stunUri);
+            if (!isValid)
+            {
+                var withScheme = $"stun:{selectedUrl}";
+                if (STUNUri.TryParse(withScheme, out var _))
+                {
+                    selectedUrl = withScheme;
+                    isValid = true;
+                }
+            }
+
+            if (!isValid)
+            {
+                throw new ArgumentException(
+                    $"Invalid ICE server URL: '{selectedUrl}'. Expected a STUN/TURN URI such as 'stun:example.org:3478' or 'turn:example.org?transport=tcp'.",
+                    nameof(iceServer));
+            }
+
+            // username (optional)
+            string username = fields.Length > 1 ? Unquote(fields[1]) : null;
+            if (string.IsNullOrWhiteSpace(username))
+            {
+                username = null;
+            }
+
+            // credential (optional)
+            string credential = fields.Length > 2 ? Unquote(fields[2]) : null;
+            if (string.IsNullOrWhiteSpace(credential))
+            {
+                credential = null;
+            }
+
+            return new IceServer
+            (
+                stunUri,
+                0,
+                username,
+                credential
+            );
         }
 
         /// <summary>
@@ -225,7 +343,7 @@ namespace SIPSorcery.Net
                 // TODO: Currently implementation always use UDP candidates as we will only support TURN TCP Transport.
                 //var relayProtocol = _uri.Protocol == ProtocolType.Tcp ? RTCIceProtocol.tcp : RTCIceProtocol.udp;
                 var relayProtocol = RTCIceProtocol.udp;
-                
+
                 candidate.SetAddressProperties(relayProtocol, RelayEndPoint.Address, (ushort)RelayEndPoint.Port,
                     type, null, 0);
                 candidate.IceServer = this;
@@ -234,7 +352,7 @@ namespace SIPSorcery.Net
             }
             else
             {
-                logger.LogWarning($"Could not get ICE server candidate for {_uri} and type {type}.");
+                logger.LogWarning("Could not get ICE server candidate for {Uri} and type {Type}.", _uri, type);
                 return null;
             }
         }
@@ -289,7 +407,7 @@ namespace SIPSorcery.Net
                     // If the relay end point is set then this connection check has already been completed.
                     if (RelayEndPoint == null)
                     {
-                        logger.LogDebug($"TURN allocate success response received for ICE server check to {_uri}.");
+                        logger.LogDebug("TURN allocate success response received for ICE server check to {Uri}.", _uri);
 
                         var mappedAddrAttr = stunResponse.Attributes.Where(x => x.AttributeType == STUNAttributeTypesEnum.XORMappedAddress).FirstOrDefault();
 
@@ -323,6 +441,8 @@ namespace SIPSorcery.Net
                 }
                 else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.AllocateErrorResponse)
                 {
+                    logger.LogWarning("ICE session received an error response for an Allocate request to {Uri} from {remoteEP}.", _uri, remoteEndPoint);
+
                     ErrorResponseCount++;
 
                     if (stunResponse.Attributes.Any(x => x.AttributeType == STUNAttributeTypesEnum.ErrorCode))
@@ -344,7 +464,7 @@ namespace SIPSorcery.Net
                         {
                             ServerEndPoint = new IPEndPoint(alternateServerAttribute.Address, alternateServerAttribute.Port);
 
-                            logger.LogWarning($"ICE session received an alternate respose for an Allocate request to {_uri}, changed server url to {ServerEndPoint}.");
+                            logger.LogWarning("ICE session received an alternate respose for an Allocate request to {Uri}, changed server url to {ServerEndPoint}.", _uri, ServerEndPoint);
 
                             // Set a new transaction ID.
                             GenerateNewTransactionID();
@@ -353,12 +473,12 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            logger.LogWarning($"ICE session received an error response for an Allocate request to {_uri}, error {errCodeAttribute.ErrorCode} {errCodeAttribute.ReasonPhrase}.");
+                            logger.LogWarning("ICE session received an error response for an Allocate request to {Uri}, error {ErrorCode} {ReasonPhrase}.", _uri, errCodeAttribute.ErrorCode, errCodeAttribute.ReasonPhrase);
                         }
                     }
                     else
                     {
-                        logger.LogWarning($"ICE session received an error response for an Allocate request to {_uri}.");
+                        logger.LogWarning("ICE session received an error response for an Allocate request to {Uri}.", _uri);
                     }
                 }
                 else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.BindingSuccessResponse)
@@ -368,8 +488,7 @@ namespace SIPSorcery.Net
                     // If the server reflexive end point is set then this connection check has already been completed.
                     if (ServerReflexiveEndPoint == null)
                     {
-                        logger.LogDebug($"STUN binding success response received for ICE server check to {_uri}.");
-
+                        logger.LogDebug("STUN binding success response received for ICE server check to {Uri}.", _uri);
                         var mappedAddrAttr = stunResponse.Attributes.Where(x => x.AttributeType == STUNAttributeTypesEnum.XORMappedAddress).FirstOrDefault();
 
                         if (mappedAddrAttr != null)
@@ -396,12 +515,12 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            logger.LogWarning($"ICE session received an error response for a Binding request to {_uri}, error {errCodeAttribute.ErrorCode} {errCodeAttribute.ReasonPhrase}.");
+                            logger.LogWarning("ICE session received an error response for a Binding request to {Uri}, error {ErrorCode} {ReasonPhrase}.", _uri, errCodeAttribute.ErrorCode, errCodeAttribute.ReasonPhrase);
                         }
                     }
                     else
                     {
-                        logger.LogWarning($"STUN binding error response received for ICE server check to {_uri}.");
+                        logger.LogWarning("STUN binding error response received for ICE server check to {Uri}.", _uri);
                         // The STUN response is for a check sent to an ICE server.
                         Error = SocketError.ConnectionRefused;
                     }
@@ -409,8 +528,8 @@ namespace SIPSorcery.Net
                 else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.RefreshSuccessResponse)
                 {
                     ErrorResponseCount = 0;
-                    
-                    logger.LogDebug($"STUN binding success response received for ICE server check to {_uri}.");
+
+                    logger.LogDebug("STUN binding success response received for ICE server check to {Uri}.", _uri);
 
                     var lifetime = stunResponse.Attributes.FirstOrDefault(x => x.AttributeType == STUNAttributeTypesEnum.Lifetime);
 
@@ -419,7 +538,7 @@ namespace SIPSorcery.Net
                         TurnTimeToExpiry = DateTime.Now +
                                            TimeSpan.FromSeconds(BitConverter.ToUInt32(lifetime.Value.Reverse().ToArray(), 0));
                     }
-                    
+
                 }
                 else if (stunResponse.Header.MessageType == STUNMessageTypesEnum.RefreshErrorResponse)
                 {
@@ -438,19 +557,19 @@ namespace SIPSorcery.Net
                         }
                         else
                         {
-                            logger.LogWarning($"ICE session received an error response for a Refresh request to {_uri}, error {errCodeAttribute.ErrorCode} {errCodeAttribute.ReasonPhrase}.");
+                            logger.LogWarning("ICE session received an error response for a Refresh request to {Uri}, error {ErrorCode} {ReasonPhrase}.", _uri, errCodeAttribute.ErrorCode, errCodeAttribute.ReasonPhrase);
                         }
                     }
                     else
                     {
-                        logger.LogWarning($"STUN binding error response received for ICE server check to {_uri}.");
+                        logger.LogWarning("STUN binding error response received for ICE server check to {Uri}.", _uri);
                         // The STUN response is for a check sent to an ICE server.
                         Error = SocketError.ConnectionRefused;
                     }
                 }
                 else
                 {
-                    logger.LogWarning($"An unrecognised STUN {stunResponse.Header.MessageType} response for an ICE server check was received from {remoteEndPoint}.");
+                    logger.LogWarning("An unrecognised STUN {MessageType} response for an ICE server check was received from {RemoteEndPoint}.", stunResponse.Header.MessageType, remoteEndPoint);
                     ErrorResponseCount++;
                 }
             }

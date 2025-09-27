@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 // Filename: BufferUtils.cs
 //
 // Description: Provides some useful methods for working with byte[] buffers.
@@ -13,6 +13,7 @@
 // BSD 3-Clause "New" or "Revised" License, see included LICENSE.md file.
 //-----------------------------------------------------------------------------
 
+using System;
 using System.Text;
 
 namespace SIPSorcery.Sys
@@ -30,50 +31,48 @@ namespace SIPSorcery.Sys
         /// <returns>The start position in the buffer of the requested string or -1 if not found.</returns>
         public static int GetStringPosition(byte[] buffer, int startPosition, int endPosition, string find, string end)
         {
-            if (buffer == null || buffer.Length == 0 || find == null)
+            if (buffer == null || buffer.Length == 0 || find == null || find.Length == 0)
             {
                 return -1;
             }
-            else
+
+            byte[] findArray = Encoding.UTF8.GetBytes(find);
+            byte[] endArray = (end != null) ? Encoding.UTF8.GetBytes(end) : null;
+
+            int findPosn = 0;
+            int endPosn = 0;
+
+            for (int index = startPosition; index < endPosition && index < buffer.Length; index++)
             {
-                byte[] findArray = Encoding.UTF8.GetBytes(find);
-                byte[] endArray = (end != null) ? Encoding.UTF8.GetBytes(end) : null;
-
-                int findPosn = 0;
-                int endPosn = 0;
-
-                for (int index = startPosition; index < endPosition && index < buffer.Length; index++)
+                if (buffer[index] == findArray[findPosn])
                 {
-                    if (buffer[index] == findArray[findPosn])
-                    {
-                        findPosn++;
-                    }
-                    else
-                    {
-                        findPosn = 0;
-                    }
-
-                    if (endArray != null && buffer[index] == endArray[endPosn])
-                    {
-                        endPosn++;
-                    }
-                    else
-                    {
-                        endPosn = 0;
-                    }
-
-                    if (findPosn == findArray.Length)
-                    {
-                        return index - findArray.Length + 1;
-                    }
-                    else if (endArray != null && endPosn == endArray.Length)
-                    {
-                        return -1;
-                    }
+                    findPosn++;
+                }
+                else
+                {
+                    findPosn = 0;
                 }
 
-                return -1;
+                if (endArray != null && buffer[index] == endArray[endPosn])
+                {
+                    endPosn++;
+                }
+                else
+                {
+                    endPosn = 0;
+                }
+
+                if (findPosn == findArray.Length)
+                {
+                    return index - findArray.Length + 1;
+                }
+                else if (endArray != null && endPosn == endArray.Length)
+                {
+                    return -1;
+                }
             }
+
+            return -1;
         }
 
         public static bool HasString(byte[] buffer, int startPosition, int endPosition, string find, string end)
@@ -89,6 +88,41 @@ namespace SIPSorcery.Sys
         public static string HexStr(byte[] buffer)
         {
             return buffer.HexStr();
+        }
+
+        /// <summary>
+        /// Finds the index of a specific byte pattern in a byte array.
+        /// </summary>
+        /// <param name="buffer">The byte array to search in.</param>
+        /// <param name="pattern">The byte pattern to search for.</param>
+        /// <param name="startIndex">The index in the buffer to start the search from.</param>
+        /// <returns>The index of the first occurrence of the pattern, or -1 if not found.</returns>
+        public static int IndexOf(byte[] buffer, byte[] pattern, int startIndex = 0)
+        {
+            if (buffer == null || pattern == null || buffer.Length == 0 || pattern.Length == 0 || pattern.Length > buffer.Length)
+            {
+                return -1;
+            }
+
+            for (int i = startIndex; i <= buffer.Length - pattern.Length; i++)
+            {
+                bool match = true;
+                for (int j = 0; j < pattern.Length; j++)
+                {
+                    if (buffer[i + j] != pattern[j])
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+
+                if (match)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
     }
 }

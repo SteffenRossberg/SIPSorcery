@@ -1,4 +1,4 @@
-//-----------------------------------------------------------------------------
+﻿//-----------------------------------------------------------------------------
 // Filename: RTPSession.cs
 //
 // Description: Represents an RTP session constituted of a single media stream. The session
@@ -23,11 +23,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
-using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
-using SIPSorcery.net.RTP;
 using SIPSorcery.SIP.App;
 using SIPSorcery.Sys;
 using SIPSorceryMedia.Abstractions;
@@ -35,78 +33,6 @@ using SIPSorceryMedia.Abstractions;
 namespace SIPSorcery.Net
 {
     public delegate int ProtectRtpPacket(byte[] payload, int length, out int outputBufferLength);
-
-    public enum SetDescriptionResultEnum
-    {
-        /// <summary>
-        /// At least one media stream with a compatible format was available.
-        /// </summary>
-        OK,
-
-        /// <summary>
-        /// Both parties had audio but no compatible format was available.
-        /// </summary>
-        AudioIncompatible,
-
-        /// <summary>
-        /// Both parties had video but no compatible format was available.
-        /// </summary>
-        VideoIncompatible,
-
-        /// <summary>
-        /// No media tracks are available on the local session.
-        /// </summary>
-        NoLocalMedia,
-
-        /// <summary>
-        /// The remote description did not contain any media announcements.
-        /// </summary>
-        NoRemoteMedia,
-
-        /// <summary>
-        /// Indicates there was no media type match. For example only have audio locally
-        /// but video remote or vice-versa.
-        /// </summary>
-        NoMatchingMediaType,
-
-        /// <summary>
-        /// An unknown error.
-        /// </summary>
-        Error,
-
-        /// <summary>
-        /// A required DTLS fingerprint was missing from the session description.
-        /// </summary>
-        DtlsFingerprintMissing,
-
-        /// <summary>
-        /// The DTLS fingerprint was present but the format was not recognised.
-        /// </summary>
-        DtlsFingerprintInvalid,
-
-        /// <summary>
-        /// The DTLS fingerprint was provided with an unsupported digest. It won't
-        /// be possible to check that the certificate supplied during the DTLS handshake
-        /// matched the fingerprint.
-        /// </summary>
-        DtlsFingerprintDigestNotSupported,
-
-        /// <summary>
-        /// An unsupported data channel transport was requested (at the time of writing only
-        /// SCTP over DTLS is supported, no TCP option).
-        /// </summary>
-        DataChannelTransportNotSupported,
-
-        /// <summary>
-        /// An SDP offer was received when the local agent had already entered have local offer state.
-        /// </summary>
-        WrongSdpTypeOfferAfterOffer,
-
-        /// <summary>
-        /// Crypto attributes invalid or not compatible.
-        /// </summary>
-        CryptoNegotiationFailed,
-    }
 
     /// <summary>
     /// The RTPSession class is the primary point for interacting with the Real-Time
@@ -135,7 +61,10 @@ namespace SIPSorcery.Net
     /// </remarks>
     public class RTPSession : IMediaSession, IDisposable
     {
-        //Reduced to be smaller than MTU (1400) beucase header will add extra 2 butes that will fail to deliver to linux as the real size of the package will be 1402
+        /// <summary>
+        /// Reduced to be smaller than MTU (1400) because header will add extra 2 bytes that will fail to deliver to linux
+        /// as the real size of the package will be 1402.
+        /// </summary>
         protected internal const int RTP_MAX_PAYLOAD = 1200;
 
         /// <summary>
@@ -165,7 +94,6 @@ namespace SIPSorcery.Net
         public const string RTP_SECUREMEDIA_PROFILE = "RTP/SAVP";
         protected const int SDP_SESSIONID_LENGTH = 10;             // The length of the pseudo-random string to use for the session ID.
         public const int DTMF_EVENT_DURATION = 1200;            // Default duration for a DTMF event.
-        public const int DTMF_EVENT_PAYLOAD_ID = 101;
 
         /// <summary>
         /// When there are no RTP packets being sent for an audio or video stream webrtc.lib
@@ -178,9 +106,9 @@ namespace SIPSorcery.Net
 
         protected RtpSessionConfig rtpSessionConfig;
 
-        private Boolean m_acceptRtpFromAny = false;
+        private bool m_acceptRtpFromAny = false;
         private string m_sdpSessionID = null;           // Need to maintain the same SDP session ID for all offers and answers.
-        private int m_sdpAnnouncementVersion = 0;       // The SDP version needs to increase whenever the local SDP is modified (see https://tools.ietf.org/html/rfc6337#section-5.2.5).
+        private ulong m_sdpAnnouncementVersion = 0;     // The SDP version needs to increase whenever the local SDP is modified (see https://tools.ietf.org/html/rfc6337#section-5.2.5).
         internal int m_rtpChannelsCount = 0;            // Need to know the number of RTP Channels
 
         // The stream used for the underlying RTP session to create a single RTP channel that will
@@ -191,6 +119,7 @@ namespace SIPSorcery.Net
 
         protected List<List<SDPSsrcAttribute>> audioRemoteSDPSsrcAttributes = new List<List<SDPSsrcAttribute>>();
         protected List<List<SDPSsrcAttribute>> videoRemoteSDPSsrcAttributes = new List<List<SDPSsrcAttribute>>();
+        protected List<List<SDPSsrcAttribute>> textRemoteSDPSsrcAttributes = new List<List<SDPSsrcAttribute>>();
 
         /// <summary>
         /// Track if current remote description is invalid (used in Renegotiation logic)
@@ -233,6 +162,18 @@ namespace SIPSorcery.Net
                 if (VideoStreamList.Count > 0)
                 {
                     return VideoStreamList[0];
+                }
+                return null;
+            }
+        }
+
+        public TextStream TextStream
+        {
+            get
+            {
+                if (TextStreamList.Count > 0)
+                {
+                    return TextStreamList[0];
                 }
                 return null;
             }
@@ -289,6 +230,31 @@ namespace SIPSorcery.Net
         public IPEndPoint VideoControlDestinationEndPoint => VideoStream?.ControlDestinationEndPoint;
 
         /// <summary>
+        /// The primary local Text track for this session. Will be null if we are not sending Text.
+        /// </summary>
+        public MediaStreamTrack TextLocalTrack => TextStream?.LocalTrack;
+
+        /// <summary>
+        /// The primary remote Text track for this session. Will be null if the remote party is not sending Text.
+        /// </summary>
+        public MediaStreamTrack TextRemoteTrack => TextStream?.RemoteTrack;
+
+        /// <summary>
+        /// The primary reporting session for the text stream. Will be null if only audio or video is being sent.
+        /// </summary>
+        public RTCPSession TextRtcpSession => TextStream?.RtcpSession;
+
+        /// <summary>
+        /// The primary Text remote RTP end point this stream is sending media to.
+        /// </summary>
+        public IPEndPoint TextDestinationEndPoint => TextStream?.DestinationEndPoint;
+
+        /// <summary>
+        /// The primary Text remote RTP control end point this stream is sending to RTCP reports for the media stream to.
+        /// </summary>
+        public IPEndPoint TextControlDestinationEndPoint => TextStream?.ControlDestinationEndPoint;
+
+        /// <summary>
         /// List of all Audio Streams for this session
         /// </summary>
         public List<AudioStream> AudioStreamList { get; private set; } = new List<AudioStream>();
@@ -297,6 +263,11 @@ namespace SIPSorcery.Net
         /// List of all Video Streams for this session
         /// </summary>
         public List<VideoStream> VideoStreamList { get; private set; } = new List<VideoStream>();
+
+        /// <summary>
+        /// List of all Text Streams for this session
+        /// </summary>
+        public List<TextStream> TextStreamList { get; private set; } = new List<TextStream>();
 
         /// <summary>
         /// The SDP offered by the remote call party for this session.
@@ -315,6 +286,11 @@ namespace SIPSorcery.Net
             }
 
             if (HasVideo && !VideoStream.IsSecurityContextReady())
+            {
+                return false;
+            }
+
+            if (HasText && !TextStream.IsSecurityContextReady())
             {
                 return false;
             }
@@ -340,11 +316,26 @@ namespace SIPSorcery.Net
         /// </summary>
         public bool IsClosed { get; private set; }
 
+        [Obsolete("Use IsAudioStarted.")]
+        public bool IsStarted => IsAudioStarted;
+
         /// <summary>
-        /// Indicates whether the session has been started. Starting a session tells the RTP 
+        /// Indicates whether the audio session has been started. Starting a audio session tells the RTP 
         /// socket to start receiving,
         /// </summary>
-        public bool IsStarted { get; private set; }
+        public bool IsAudioStarted { get; private set; }
+
+        /// <summary>
+        /// Indicates whether the video session has been started. Starting a video session tells the RTP 
+        /// socket to start receiving,
+        /// </summary>
+        public bool IsVideoStarted { get; private set; }
+
+        /// <summary>
+        /// Indicates whether the text session has been started. Starting a text session tells the RTP 
+        /// socket to start receiving,
+        /// </summary>
+        public bool IsTextStarted { get; private set; }
 
         /// <summary>
         /// Indicates whether this session is using audio.
@@ -365,6 +356,17 @@ namespace SIPSorcery.Net
             get
             {
                 return VideoStream?.HasVideo == true;
+            }
+        }
+
+        /// <summary>
+        /// Indicates whether this session is using RTT.
+        /// </summary>
+        public bool HasText
+        {
+            get
+            {
+                return TextStream?.HasText == true;
             }
         }
 
@@ -392,6 +394,10 @@ namespace SIPSorcery.Net
                 {
                     videoStream.AcceptRtpFromAny = value;
                 }
+                foreach (var textStream in TextStreamList)
+                {
+                    textStream.AcceptRtpFromAny = value;
+                }
             }
         }
 
@@ -402,6 +408,16 @@ namespace SIPSorcery.Net
         public IPAddress RtpBindAddress => rtpSessionConfig.BindAddress;
 
         /// <summary>
+        /// Gets fired when the remote SDP is received and the set of common text formats is set. (on the primary one)
+        /// </summary>
+        public event Action<List<TextFormat>> OnTextFormatsNegotiated;
+
+        /// <summary>
+        /// Gets fired when the remote SDP is received and the set of common text formats is set. (using its index)
+        /// </summary>
+        public event Action<int, List<TextFormat>> OnTextFormatsNegotiatedByIndex;
+
+        /// <summary>
         /// Gets fired when the remote SDP is received and the set of common audio formats is set. (on the primary one)
         /// </summary>
         public event Action<List<AudioFormat>> OnAudioFormatsNegotiated;
@@ -410,6 +426,16 @@ namespace SIPSorcery.Net
         /// Gets fired when the remote SDP is received and the set of common audio formats is set. (using its index)
         /// </summary>
         public event Action<int, List<AudioFormat>> OnAudioFormatsNegotiatedByIndex;
+
+        /// <summary>
+        /// Event for receiving an encoded audio frame from the remote party. Encoded in this
+        /// case refers to media encoding, e.g. PCMU, OPUS. For audio payloads RTP framing is not
+        /// typically used so each frame will correspond to a single RTP packet. This event
+        /// aggregates receiving audio frames from all media stream attached to the RTP session.
+        /// THe media stream index can be used to identify which stream the frame is from in
+        /// the case there are multiple audio streams.
+        /// </summary>
+        public event Action<EncodedAudioFrame> OnAudioFrameReceived;
 
         /// <summary>
         /// Gets fired when the remote SDP is received and the set of common video formats is set. (on the primary one)
@@ -447,6 +473,9 @@ namespace SIPSorcery.Net
         public event Action<int, IPEndPoint, uint, byte[], VideoFormat> OnVideoFrameReceivedByIndex;
 
         /// <summary>
+        /// It's recommended to use the <see cref="OnAudioFrameReceived"/> and <see cref="OnVideoFrameReceived"/>
+        /// events where applicable in preference to this was lowl level RTP packet event.
+        /// 
         /// Gets fired when an RTP packet is received from a remote party. (on the primary one)
         /// Parameters are:
         ///  - Remote endpoint packet was received from,
@@ -456,6 +485,9 @@ namespace SIPSorcery.Net
         public event Action<IPEndPoint, SDPMediaTypesEnum, RTPPacket> OnRtpPacketReceived;
 
         /// <summary>
+        /// It's recommended to use the <see cref="OnAudioFrameReceived"/> and <see cref="OnVideoFrameReceived"/>
+        /// events where applicable in preference to this was lowl level RTP packet event.
+        /// 
         /// Gets fired when an RTP packet is received from a remote party (using its index).
         /// Parameters are:
         ///  - index of the AudioStream or VideoStream
@@ -464,6 +496,27 @@ namespace SIPSorcery.Net
         ///  - The full RTP packet.
         /// </summary>
         public event Action<int, IPEndPoint, SDPMediaTypesEnum, RTPPacket> OnRtpPacketReceivedByIndex;
+
+        /// <summary>
+        /// Gets fired when an RTP Header packet is received from a remote party. (on the primary one)
+        /// Parameters are:
+        ///  - Remote endpoint packet was received from,
+        ///  - The media type the packet contains, will be audio or video,
+        ///  - The RTP Header extension URI,
+        ///  - Object/Value of the header
+        /// </summary>
+        public event Action<IPEndPoint, SDPMediaTypesEnum, string, object> OnRtpHeaderReceived;
+
+        /// <summary>
+        /// Gets fired when an RTP Header packet is received from a remote party.
+        /// Parameters are:
+        ///  - index of the AudioStream or VideoStream
+        ///  - Remote endpoint packet was received from,
+        ///  - The media type the packet contains, will be audio or video,
+        ///  - The RTP Header extension URI,
+        ///  - Object/Value of the header
+        /// </summary>
+        public event Action<int, IPEndPoint, SDPMediaTypesEnum, string, object> OnRtpHeaderReceivedByIndex;
 
         /// <summary>
         /// Gets fired when an RTP event is detected on the remote call party's RTP stream (on the primary one).
@@ -513,12 +566,12 @@ namespace SIPSorcery.Net
         public event Action<int, IPEndPoint, SDPMediaTypesEnum, RTCPCompoundPacket> OnReceiveReportByIndex;
 
         /// <summary>
-        /// Gets fired when an RTCP report is sent (the primary one). This event is for diagnostics only.
+        /// Gets fired when an RTCP report is sent (the primary one). This event is for diagnostic purposes only.
         /// </summary>
         public event Action<SDPMediaTypesEnum, RTCPCompoundPacket> OnSendReport;
 
         /// <summary>
-        /// Gets fired when an RTCP report is sent (using its nidex). This event is for diagnostics only.
+        /// Gets fired when an RTCP report is sent (using its index). This event is for diagnostic purposes only.
         /// </summary>
         public event Action<int, SDPMediaTypesEnum, RTCPCompoundPacket> OnSendReportByIndex;
 
@@ -533,6 +586,8 @@ namespace SIPSorcery.Net
         /// source should stop generating samples.
         /// </summary>
         public event Action OnClosed;
+
+        public event Action<SDP> OnRemoteDescriptionChanged;
 
         /// <summary>
         /// Creates a new RTP session. The synchronisation source and sequence number are initialised to
@@ -584,11 +639,11 @@ namespace SIPSorcery.Net
             }
         }
 
-
         protected void ResetRemoteSDPSsrcAttributes()
         {
             audioRemoteSDPSsrcAttributes.Clear();
             videoRemoteSDPSsrcAttributes.Clear();
+            textRemoteSDPSsrcAttributes.Clear();
         }
 
         protected void AddRemoteSDPSsrcAttributes(SDPMediaTypesEnum mediaType, List<SDPSsrcAttribute> sdpSsrcAttributes)
@@ -600,6 +655,10 @@ namespace SIPSorcery.Net
             else if (mediaType == SDPMediaTypesEnum.video)
             {
                 videoRemoteSDPSsrcAttributes.Add(sdpSsrcAttributes);
+            }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                textRemoteSDPSsrcAttributes.Add(sdpSsrcAttributes);
             }
         }
 
@@ -623,8 +682,18 @@ namespace SIPSorcery.Net
                 }
                 str += "] ";
             }
+            str += "] \r\n Text: [ ";
+            foreach (var textRemoteSDPSsrcAttribute in textRemoteSDPSsrcAttributes)
+            {
+                str += " [";
+                foreach (var attr in textRemoteSDPSsrcAttribute)
+                {
+                    str += attr.SSRC + " - ";
+                }
+                str += "] ";
+            }
             str += " ]";
-            logger.LogDebug($"LogRemoteSDPSsrcAttributes: {str}");
+            logger.LogDebug("LogRemoteSDPSsrcAttributes: {RemoteSDPSsrcAttributes}", str);
         }
 
         private void CreateRtcpSession(MediaStream mediaStream)
@@ -635,7 +704,9 @@ namespace SIPSorcery.Net
                 mediaStream.OnSendReportByIndex += RaiseOnSendReport;
                 mediaStream.OnRtpEventByIndex += RaisedOnRtpEvent;
                 mediaStream.OnRtpPacketReceivedByIndex += RaisedOnRtpPacketReceived;
+                mediaStream.OnRtpHeaderReceivedByIndex += RaisedOnRtpHeaderReceived;
                 mediaStream.OnReceiveReportByIndex += RaisedOnOnReceiveReport;
+                mediaStream.RtcpSession.OnReportReadyToSend += SendRtcpReport;
 
                 if (mediaStream.MediaType == SDPMediaTypesEnum.audio)
                 {
@@ -643,6 +714,18 @@ namespace SIPSorcery.Net
                     if (audioStream != null)
                     {
                         audioStream.OnAudioFormatsNegotiatedByIndex += RaisedOnAudioFormatsNegotiated;
+                        audioStream.OnAudioFrameReceived += RaiseOnAudioFrameReceived;
+                    }
+                }
+                else if (mediaStream.MediaType == SDPMediaTypesEnum.text)
+                {
+                    var textStream = mediaStream as TextStream;
+                    if (textStream != null)
+                    {
+                        textStream.OnTextFormatsNegotiatedByIndex += RaisedOnTextFormatsNegotiated;
+
+                        // Text streams currently need to dal with the encoded media by directly
+                        // handling the RTP packets with one of the OnRtpPacketReceived events.
                     }
                 }
                 else
@@ -673,6 +756,15 @@ namespace SIPSorcery.Net
                     if (audioStream != null)
                     {
                         audioStream.OnAudioFormatsNegotiatedByIndex -= RaisedOnAudioFormatsNegotiated;
+                        audioStream.OnAudioFrameReceived -= RaiseOnAudioFrameReceived;
+                    }
+                }
+                else if (mediaStream.MediaType == SDPMediaTypesEnum.text)
+                {
+                    var textStream = mediaStream as TextStream;
+                    if (textStream != null)
+                    {
+                        textStream.OnTextFormatsNegotiatedByIndex -= RaisedOnTextFormatsNegotiated;
                     }
                 }
                 else
@@ -685,7 +777,7 @@ namespace SIPSorcery.Net
                     }
                 }
 
-                mediaStream.RtcpSession.Close(reason);
+                mediaStream.RtcpSession?.Close(reason);
                 mediaStream.RtcpSession = null;
             }
         }
@@ -726,6 +818,15 @@ namespace SIPSorcery.Net
             OnRtpPacketReceivedByIndex?.Invoke(index, ipEndPoint, media, rtpPacket);
         }
 
+        private void RaisedOnRtpHeaderReceived(int index, IPEndPoint ipEndPoint, SDPMediaTypesEnum media, String uri, Object value)
+        {
+            if (index == 0)
+            {
+                OnRtpHeaderReceived?.Invoke(ipEndPoint, media, uri, value);
+            }
+            OnRtpHeaderReceivedByIndex?.Invoke(index, ipEndPoint, media, uri, value);
+        }
+
         private void RaisedOnOnReceiveReport(int index, IPEndPoint ipEndPoint, SDPMediaTypesEnum media, RTCPCompoundPacket report)
         {
             if (index == 0)
@@ -753,6 +854,15 @@ namespace SIPSorcery.Net
             OnVideoFormatsNegotiatedByIndex?.Invoke(index, videoFormats);
         }
 
+        private void RaisedOnTextFormatsNegotiated(int index, List<TextFormat> textFormats)
+        {
+            if (index == 0)
+            {
+                OnTextFormatsNegotiated?.Invoke(textFormats);
+            }
+            OnTextFormatsNegotiatedByIndex?.Invoke(index, textFormats);
+        }
+
         private void RaisedOnOnVideoFrameReceived(int index, IPEndPoint ipEndPoint, uint timestamp, byte[] frame, VideoFormat videoFormat)
         {
             if (index == 0)
@@ -760,6 +870,11 @@ namespace SIPSorcery.Net
                 OnVideoFrameReceived?.Invoke(ipEndPoint, timestamp, frame, videoFormat);
             }
             OnVideoFrameReceivedByIndex?.Invoke(index, ipEndPoint, timestamp, frame, videoFormat);
+        }
+
+        private void RaiseOnAudioFrameReceived(EncodedAudioFrame encodedAudioFrame)
+        {
+            OnAudioFrameReceived?.Invoke(encodedAudioFrame);
         }
 
         /// <summary>
@@ -771,9 +886,13 @@ namespace SIPSorcery.Net
         /// for Internet access. Any and IPv6Any are special cases. If they are set the respective
         /// Internet facing IPv4 or IPv6 address will be used.</param>
         /// <returns>A task that when complete contains the SDP offer.</returns>
-        public virtual SDP CreateOffer(IPAddress connectionAddress)
+        public virtual SDP CreateOffer(IPAddress connectionAddress = null)
         {
-            if (((AudioStream == null) || (AudioStream.LocalTrack == null)) && ((VideoStream == null) || (VideoStream.LocalTrack == null)))
+            if (
+                (AudioStream == null || AudioStream.LocalTrack == null) &&
+                (VideoStream == null || VideoStream.LocalTrack == null) &&
+                (TextStream == null || TextStream.LocalTrack == null)
+                )
             {
                 logger.LogWarning("No local media tracks available for create offer.");
                 return null;
@@ -792,7 +911,10 @@ namespace SIPSorcery.Net
                 }
 
                 RequireRenegotiation = true;
-                return GetSessionDescription(mediaStreams, connectionAddress);
+
+                var sdpConnectionAddress = GetSdpConnectionAddress(connectionAddress, null);
+
+                return GetSessionDescription(mediaStreams, sdpConnectionAddress);
             }
         }
 
@@ -823,6 +945,7 @@ namespace SIPSorcery.Net
 
                 int currentAudioStreamCount = 0;
                 int currentVideoStreamCount = 0;
+                int currentTextStreamCount = 0;
                 MediaStream currentMediaStream;
 
                 List<MediaStream> mediaStreams = new List<MediaStream>();
@@ -840,6 +963,10 @@ namespace SIPSorcery.Net
                     {
                         currentMediaStream = GetOrCreateVideoStream(currentVideoStreamCount++);
                     }
+                    else if (announcement.Media == SDPMediaTypesEnum.text)
+                    {
+                        currentMediaStream = GetOrCreateTextStream(currentTextStreamCount++);
+                    }
 
                     if (currentMediaStream != null && currentMediaStream.LocalTrack != null)
                     {
@@ -847,23 +974,52 @@ namespace SIPSorcery.Net
                     }
                 }
 
-                if (connectionAddress == null)
-                {
-                    // No specific connection address supplied. Lookup the local address to connect to the offer address.
-                    var offerConnectionAddress = (offer.Connection?.ConnectionAddress != null) ? IPAddress.Parse(offer.Connection.ConnectionAddress) : null;
+                var sdpConnectionAddress = GetSdpConnectionAddress(
+                    connectionAddress,
+                    offer.Connection?.ConnectionAddress != null ? IPAddress.Parse(offer.Connection.ConnectionAddress) : null);
 
-                    if (offerConnectionAddress == null || offerConnectionAddress == IPAddress.Any || offerConnectionAddress == IPAddress.IPv6Any)
-                    {
-                        connectionAddress = NetServices.InternetDefaultAddress;
-                    }
-                    else
-                    {
-                        connectionAddress = NetServices.GetLocalAddressForRemote(offerConnectionAddress);
-                    }
-                }
-
-                return GetSessionDescription(mediaStreams, connectionAddress);
+                return GetSessionDescription(mediaStreams, sdpConnectionAddress);
             }
+        }
+
+        /// <summary>
+        /// Attempts to get the IP address to use in the SDP offer or answer.
+        /// </summary>
+        /// <param name="connectionAddress">An optional connection address supplied by the calling application to use as a fallback.</param>
+        /// <param name="offerConnectionAddress">If the address was triggered by an SDP offer this is the connection address of the remote peer.</param>
+        /// <returns>The IP address to use in the SDP.</returns>
+        private IPAddress GetSdpConnectionAddress(IPAddress connectionAddress, IPAddress offerConnectionAddress)
+        {
+            IPAddress sdpConnectionAddress = null;
+
+            // If a relay endpoint has been set on any of this session's media streams it takes precedence and
+            // will be used in the SDP offers and answers.
+            var relayEndPoint = GetFirstRelayEndPointFromMediaStreams();
+            if (relayEndPoint != null && relayEndPoint.RemotePeerRelayEndPoint != null)
+            {
+                sdpConnectionAddress = relayEndPoint.RemotePeerRelayEndPoint.Address;
+            }
+
+            // IF a STUN server has been used to get the RTP channel's server reflexive address use that.
+            if (sdpConnectionAddress == null)
+            {
+                var rtpSrflxEndPoint = GetFirstRTPSrflxEndPointFromMediaStreams();
+                if (rtpSrflxEndPoint != null)
+                {
+                    sdpConnectionAddress = rtpSrflxEndPoint.Address;
+                }
+            }
+
+            if (sdpConnectionAddress == null)
+            {
+                // No specific connection address supplied. Lookup the local address to connect to the offer address.
+                if (offerConnectionAddress != null && offerConnectionAddress != IPAddress.Any && offerConnectionAddress != IPAddress.IPv6Any)
+                {
+                    sdpConnectionAddress = NetServices.GetLocalAddressForRemote(offerConnectionAddress);
+                }
+            }
+
+            return sdpConnectionAddress ?? connectionAddress;
         }
 
         protected virtual AudioStream GetOrCreateAudioStream(int index)
@@ -898,6 +1054,21 @@ namespace SIPSorcery.Net
             return null;
         }
 
+        protected virtual TextStream GetOrCreateTextStream(int index)
+        {
+            if (index < TextStreamList.Count)
+            {
+                return TextStreamList[index];
+            }
+            else if (index == TextStreamList.Count)
+            {
+                TextStream textStream = new TextStream(rtpSessionConfig, index);
+                TextStreamList.Add(textStream);
+                return textStream;
+            }
+            return null;
+        }
+
         /// <summary>
         /// Sets the remote SDP description for this session.
         /// </summary>
@@ -928,6 +1099,10 @@ namespace SIPSorcery.Net
                     {
                         return SetDescriptionResultEnum.NoMatchingMediaType;
                     }
+                    else if (remoteMediaType == SDPMediaTypesEnum.text && ((TextStream == null) || (TextStream.LocalTrack == null)))
+                    {
+                        return SetDescriptionResultEnum.NoMatchingMediaType;
+                    }
                 }
 
                 // Pre-flight checks have passed. Move onto matching up the local and remote media streams.
@@ -949,15 +1124,29 @@ namespace SIPSorcery.Net
                     videoStream.RemoteTrack = null;
                 }
 
+                foreach (var textStream in TextStreamList)
+                {
+                    textStream.RemoteTrack = null;
+                }
+
                 int currentAudioStreamCount = 0;
                 int currentVideoStreamCount = 0;
+                int currentTextStreamCount = 0;
                 MediaStream currentMediaStream;
 
-                foreach (var announcement in sessionDescription.Media.Where(x => x.Media == SDPMediaTypesEnum.audio || x.Media == SDPMediaTypesEnum.video))
+                foreach (var announcement in sessionDescription.Media.Where(x => x.Media == SDPMediaTypesEnum.audio || x.Media == SDPMediaTypesEnum.video || x.Media == SDPMediaTypesEnum.text))
                 {
                     if (announcement.Media == SDPMediaTypesEnum.audio)
                     {
                         currentMediaStream = GetOrCreateAudioStream(currentAudioStreamCount++);
+                        if (currentMediaStream == null)
+                        {
+                            return SetDescriptionResultEnum.Error;
+                        }
+                    }
+                    else if (announcement.Media == SDPMediaTypesEnum.text)
+                    {
+                        currentMediaStream = GetOrCreateTextStream(currentTextStreamCount++);
                         if (currentMediaStream == null)
                         {
                             return SetDescriptionResultEnum.Error;
@@ -981,7 +1170,7 @@ namespace SIPSorcery.Net
                     {
                         if (announcement.Transport != RTP_SECUREMEDIA_PROFILE)
                         {
-                            logger.LogError($"Error negotiating secure media. Invalid Transport {announcement.Transport}.");
+                            logger.LogError("Error negotiating secure media. Invalid Transport {Transport}.", announcement.Transport);
                             return SetDescriptionResultEnum.CryptoNegotiationFailed;
                         }
 
@@ -992,16 +1181,16 @@ namespace SIPSorcery.Net
                             var srtpHandler = currentMediaStream.GetOrCreateSrtpHandler();
                             if (!(srtpHandler.IsNegotiationComplete && srtpHandler.RemoteSecurityDescriptionUnchanged(announcement.SecurityDescriptions)))
                             {
-                               if (!srtpHandler.SetupRemote(announcement.SecurityDescriptions, sdpType))
-                               {
-                                   logger.LogError($"Error negotiating secure media for type {mediaType}. Incompatible crypto parameter.");
-                                   return SetDescriptionResultEnum.CryptoNegotiationFailed;
-                               }
+                                if (!srtpHandler.SetupRemote(announcement.SecurityDescriptions, sdpType))
+                                {
+                                    logger.LogError("Error negotiating secure media for type {MediaType}. Incompatible crypto parameter.", mediaType);
+                                    return SetDescriptionResultEnum.CryptoNegotiationFailed;
+                                }
 
-                               if (srtpHandler.IsNegotiationComplete)
-                               {
-                                   currentMediaStream.SetSecurityContext(srtpHandler.ProtectRTP, srtpHandler.UnprotectRTP, srtpHandler.ProtectRTCP, srtpHandler.UnprotectRTCP);
-                               }
+                                if (srtpHandler.IsNegotiationComplete)
+                                {
+                                    currentMediaStream.SetSecurityContext(srtpHandler.ProtectRTP, srtpHandler.UnprotectRTP, srtpHandler.ProtectRTCP, srtpHandler.UnprotectRTCP);
+                                }
                             }
                         }
                         // If we had no crypto but we were definetely expecting something since we had a port value
@@ -1021,23 +1210,42 @@ namespace SIPSorcery.Net
                     }
                     else
                     {
-                        // As proved by Azure implementation, we need to send based on capabilities of remote track. Azure return SDP with only one possible Codec (H264 107)
-                        // but we receive frames based on our LocalRemoteTracks, so its possiblet o receive a frame with ID 122, for exemple, even when remote annoucement only have 107
-                        // Thats why we changed line below to keep local track capabilities untouched as we can always do it during send/receive moment
                         capabilities = SDPAudioVideoMediaFormat.GetCompatibleFormats(currentMediaStream.RemoteTrack?.Capabilities, currentMediaStream.LocalTrack?.Capabilities);
-                        //Keep same order of LocalTrack priority to prevent incorrect sending format
-                        SDPAudioVideoMediaFormat.SortMediaCapability(capabilities, currentMediaStream.LocalTrack?.Capabilities);
 
-                        currentMediaStream.RemoteTrack.Capabilities = capabilities;
+                        // The offerer gets to set the codec priority.
+                        SDPAudioVideoMediaFormat.SortMediaCapability(capabilities,
+                            sdpType == SdpType.offer ? currentMediaStream.LocalTrack?.Capabilities : currentMediaStream.RemoteTrack?.Capabilities);
+
                         currentMediaStream.LocalTrack.Capabilities = capabilities;
+                        currentMediaStream.RemoteTrack.Capabilities = capabilities;
 
                         if (currentMediaStream.MediaType == SDPMediaTypesEnum.audio)
                         {
+                            // Adjust the local track's RTP event capability if the remote party has specified a different payload ID.
+                            var currentLocalTrackCapabilities = currentMediaStream.LocalTrack.Capabilities;
+                            SDPAudioVideoMediaFormat? localRTPEventCapabilities = null;
+                            if (currentLocalTrackCapabilities.Any(x => x.Name().ToLower() == SDP.TELEPHONE_EVENT_ATTRIBUTE))
+                            {
+                                localRTPEventCapabilities = currentLocalTrackCapabilities.First(x => x.Name().ToLower() == SDP.TELEPHONE_EVENT_ATTRIBUTE);
+                            }
+                            else
+                            {
+                                localRTPEventCapabilities = MediaStream.DefaultRTPEventFormat;
+                            }
+
+                            currentMediaStream.LocalTrack.Capabilities = capabilities.Where(x => x.Name().ToLower() != SDP.TELEPHONE_EVENT_ATTRIBUTE).ToList();
+                            if (localRTPEventCapabilities != null)
+                            {
+                                currentMediaStream.LocalTrack.Capabilities.Add(localRTPEventCapabilities.Value);
+                            }
+
                             // Check whether RTP events can be supported and adjust our parameters to match the remote party if we can.
                             SDPAudioVideoMediaFormat commonEventFormat = SDPAudioVideoMediaFormat.GetCommonRtpEventFormat(announcement.MediaFormats.Values.ToList(), currentMediaStream.LocalTrack.Capabilities);
                             if (!commonEventFormat.IsEmpty())
                             {
-                                currentMediaStream.RemoteRtpEventPayloadID = commonEventFormat.ID;
+                                currentMediaStream.NegotiatedRtpEventPayloadID = commonEventFormat.ID;
+                                currentMediaStream.LocalTrack.Capabilities.RemoveAll(x => x.Name().ToLower() == SDP.TELEPHONE_EVENT_ATTRIBUTE);
+                                currentMediaStream.LocalTrack.Capabilities.Add(commonEventFormat);
                             }
                         }
 
@@ -1046,11 +1254,13 @@ namespace SIPSorcery.Net
                         IPEndPoint remoteRtcpEP = null;
                         if (remoteTrack.StreamStatus != MediaStreamStatusEnum.Inactive && currentMediaStream.LocalTrack.StreamStatus != MediaStreamStatusEnum.Inactive)
                         {
-                            remoteRtcpEP = (rtpSessionConfig.IsRtcpMultiplexed) ? remoteRtpEP : new IPEndPoint(remoteRtpEP.Address, remoteRtpEP.Port + 1);
+                            remoteRtcpEP = rtpSessionConfig.IsRtcpMultiplexed ? remoteRtpEP : new IPEndPoint(remoteRtpEP.Address, remoteRtpEP.Port + 1);
                         }
 
                         currentMediaStream.DestinationEndPoint = (remoteRtpEP != null && remoteRtpEP.Port != SDP.IGNORE_RTP_PORT_NUMBER) ? remoteRtpEP : currentMediaStream.DestinationEndPoint;
                         currentMediaStream.ControlDestinationEndPoint = (remoteRtcpEP != null && remoteRtcpEP.Port != SDP.IGNORE_RTP_PORT_NUMBER) ? remoteRtcpEP : currentMediaStream.ControlDestinationEndPoint;
+
+                        logger.LogDebug("Setting remote {SdpMediaType} track with sdp destination {DestinationEndPoint} and control destination {ControlDestinationEndPoint}.", currentMediaStream.MediaType, currentMediaStream.DestinationEndPoint, currentMediaStream.ControlDestinationEndPoint);
                     }
 
                     if (currentMediaStream.MediaType == SDPMediaTypesEnum.audio)
@@ -1060,10 +1270,19 @@ namespace SIPSorcery.Net
                             return SetDescriptionResultEnum.AudioIncompatible;
                         }
                     }
-                    else if (capabilities?.Count == 0 || (currentMediaStream.LocalTrack == null && currentMediaStream.LocalTrack != null && currentMediaStream.LocalTrack.Capabilities?.Count == 0))
+                    else if (currentMediaStream.MediaType == SDPMediaTypesEnum.text)
                     {
-                        return SetDescriptionResultEnum.VideoIncompatible;
-
+                        if (capabilities?.Count == 0 || (currentMediaStream.LocalTrack == null && currentMediaStream.LocalTrack != null && currentMediaStream.LocalTrack.Capabilities?.Count == 0))
+                        {
+                            return SetDescriptionResultEnum.TextIncompatible;
+                        }
+                    }
+                    else if (currentMediaStream.MediaType == SDPMediaTypesEnum.video)
+                    {
+                        if (capabilities?.Count == 0 || (currentMediaStream.LocalTrack == null && currentMediaStream.LocalTrack != null && currentMediaStream.LocalTrack.Capabilities?.Count == 0))
+                        {
+                            return SetDescriptionResultEnum.VideoIncompatible;
+                        }
                     }
                 }
 
@@ -1085,6 +1304,15 @@ namespace SIPSorcery.Net
                     }
                 }
 
+                //Close old RTCPSessions opened
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream.RtcpSession != null && textStream.RemoteTrack == null && textStream.LocalTrack == null)
+                    {
+                        textStream.RtcpSession.Close(null);
+                    }
+                }
+
                 foreach (var audioStream in AudioStreamList)
                 {
                     audioStream.CheckAudioFormatsNegotiation();
@@ -1095,16 +1323,23 @@ namespace SIPSorcery.Net
                     videoStream.CheckVideoFormatsNegotiation();
                 }
 
+                foreach (var textStream in TextStreamList)
+                {
+                    textStream.CheckTextFormatsNegotiation();
+                }
+
                 // If we get to here then the remote description was compatible with the local media tracks.
                 // Set the remote description and end points.
                 RequireRenegotiation = false;
                 RemoteDescription = sessionDescription;
 
+                OnRemoteDescriptionChanged?.Invoke(RemoteDescription);
+
                 return SetDescriptionResultEnum.OK;
             }
             catch (Exception excp)
             {
-                logger.LogError($"Exception in RTPSession SetRemoteDescription. {excp.Message}.");
+                logger.LogError(excp, "Exception in RTPSession SetRemoteDescription. {ErrorMessage}.", excp.Message);
                 return SetDescriptionResultEnum.Error;
             }
         }
@@ -1126,6 +1361,11 @@ namespace SIPSorcery.Net
                 VideoStream.LocalTrack.StreamStatus = status;
                 m_sdpAnnouncementVersion++;
             }
+            else if (kind == SDPMediaTypesEnum.text && TextStream?.LocalTrack != null)
+            {
+                TextStream.LocalTrack.StreamStatus = status;
+                m_sdpAnnouncementVersion++;
+            }
         }
 
         /// <summary>
@@ -1145,7 +1385,7 @@ namespace SIPSorcery.Net
             {
                 if (announcement.Port < IPEndPoint.MinPort || announcement.Port > IPEndPoint.MaxPort)
                 {
-                    logger.LogWarning($"Remote {kind} announcement contained an invalid port number {announcement.Port}.");
+                    logger.LogWarning("Remote {SdpMediaType} announcement contained an invalid port number {Port}.", kind, announcement.Port);
 
                     // Set the remote port number to "9" which means ignore and wait for it be set some other way
                     // such as when a remote RTP packet or arrives or ICE negotiation completes.
@@ -1186,7 +1426,7 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
-        /// Adds a media track to this session. A media track represents an audio or video
+        /// Adds a media track to this session. A media track represents an audio or video or text
         /// stream and can be a local (which means we're sending) or remote (which means
         /// we're receiving).
         /// </summary>
@@ -1250,6 +1490,18 @@ namespace SIPSorcery.Net
                     {
                         RequireRenegotiation = true;
                         audioStream.LocalTrack = null;
+                        return true;
+                    }
+                }
+            }
+            else if (track.Kind == SDPMediaTypesEnum.text)
+            {
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream.LocalTrack == track)
+                    {
+                        RequireRenegotiation = true;
+                        textStream.LocalTrack = null;
                         return true;
                     }
                 }
@@ -1329,6 +1581,29 @@ namespace SIPSorcery.Net
                     return true;
                 }
             }
+            else if (track.Kind == SDPMediaTypesEnum.text)
+            {
+                TextStream textStream = null;
+                foreach (var checkTextStream in TextStreamList)
+                {
+                    if (checkTextStream.RemoteTrack == track)
+                    {
+                        RequireRenegotiation = true;
+                        checkTextStream.RemoteTrack = null;
+                        textStream = checkTextStream;
+                        break;
+                    }
+                }
+
+                if (textStream != null)
+                {
+                    //if ( (textStream.LocalTrack == null) && (textStream.RemoteTrack == null) )
+                    //{
+                    //    TextStreamList.Remove(textStream);
+                    //}
+                    return true;
+                }
+            }
 
             return false;
         }
@@ -1349,6 +1624,10 @@ namespace SIPSorcery.Net
             else if (track.Kind == SDPMediaTypesEnum.video)
             {
                 currentMediaStream = GetNextVideoStreamByLocalTrack();
+            }
+            else if (track.Kind == SDPMediaTypesEnum.text)
+            {
+                currentMediaStream = GetNextTextStreamByLocalTrack();
             }
             else
             {
@@ -1391,6 +1670,10 @@ namespace SIPSorcery.Net
             {
                 currentMediaStream = GetNextVideoStreamByRemoteTrack();
             }
+            else if (track.Kind == SDPMediaTypesEnum.text)
+            {
+                currentMediaStream = GetNextTextStreamByRemoteTrack();
+            }
             else
             {
                 return;
@@ -1417,6 +1700,11 @@ namespace SIPSorcery.Net
             {
                 videoStream.SetDestination(rtpEndPoint, rtcpEndPoint);
             }
+
+            foreach (var textStream in TextStreamList)
+            {
+                textStream.SetDestination(rtpEndPoint, rtcpEndPoint);
+            }
         }
 
         protected void SetGlobalSecurityContext(ProtectRtpPacket protectRtp, ProtectRtpPacket unprotectRtp, ProtectRtpPacket protectRtcp, ProtectRtpPacket unprotectRtcp)
@@ -1429,6 +1717,11 @@ namespace SIPSorcery.Net
             foreach (var videoStream in VideoStreamList)
             {
                 videoStream.SetSecurityContext(protectRtp, unprotectRtp, protectRtcp, unprotectRtcp);
+            }
+
+            foreach (var textStream in TextStreamList)
+            {
+                textStream.SetSecurityContext(protectRtp, unprotectRtp, protectRtcp, unprotectRtcp);
             }
         }
 
@@ -1444,6 +1737,58 @@ namespace SIPSorcery.Net
                 }
                 mediaStream.SetDestination(m_primaryStream.DestinationEndPoint, m_primaryStream.ControlDestinationEndPoint);
             }
+        }
+
+        protected virtual TextStream GetNextTextStreamByLocalTrack()
+        {
+            int index = TextStreamList.Count;
+            if (index > 0)
+            {
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream.LocalTrack == null)
+                    {
+                        return textStream;
+                    }
+                }
+            }
+
+            var newTextStream = GetOrCreateTextStream(index);
+            newTextStream.AcceptRtpFromAny = AcceptRtpFromAny;
+
+            if (index != 0)
+            {
+                InitIPEndPointAndSecurityContext(newTextStream);
+            }
+
+            return newTextStream;
+        }
+
+        private TextStream GetNextTextStreamByRemoteTrack()
+        {
+            int index = TextStreamList.Count;
+            if (index > 0)
+            {
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream.RemoteTrack == null)
+                    {
+                        return textStream;
+                    }
+                }
+            }
+
+            // We need to create new TextStream
+            var newTextStream = GetOrCreateTextStream(index);
+            newTextStream.AcceptRtpFromAny = AcceptRtpFromAny;
+
+            // If it's not the first one we need to init it
+            if (index != 0)
+            {
+                InitIPEndPointAndSecurityContext(newTextStream);
+            }
+
+            return newTextStream;
         }
 
         protected virtual AudioStream GetNextAudioStreamByLocalTrack()
@@ -1583,9 +1928,33 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
+        /// Attempts to get the first relay end point from any of the media streams. A media stream will have a relay end point
+        /// set if is using TURN.
+        /// </summary>
+        private TurnRelayEndPoint GetFirstRelayEndPointFromMediaStreams()
+        {
+            return
+                AudioStreamList.FirstOrDefault(x => x.IsUsingRelayEndPoint)?.RtpRelayEndPoint ??
+                VideoStreamList.FirstOrDefault(x => x.IsUsingRelayEndPoint)?.RtpRelayEndPoint ??
+                TextStreamList.FirstOrDefault(x => x.IsUsingRelayEndPoint)?.RtpRelayEndPoint;
+        }
+
+        /// <summary>
+        /// Attempts to get the first RTP STUN server reflexive end point from any of the media streams. A media stream will only have a STUN reflexive end point
+        /// set if a STUN client has been used to determine it.
+        /// </summary>
+        private IPEndPoint GetFirstRTPSrflxEndPointFromMediaStreams()
+        {
+            return
+                AudioStreamList.Where(x => x.GetRTPChannel()?.RTPSrflxEndPoint != null).FirstOrDefault()?.GetRTPChannel()?.RTPSrflxEndPoint ??
+                VideoStreamList.Where(x => x.GetRTPChannel()?.RTPSrflxEndPoint != null).FirstOrDefault()?.GetRTPChannel()?.RTPSrflxEndPoint ??
+                TextStreamList.Where(x => x.GetRTPChannel()?.RTPSrflxEndPoint != null).FirstOrDefault()?.GetRTPChannel()?.RTPSrflxEndPoint;
+        }
+
+        /// <summary>
         /// Generates a session description from the provided list of MediaStream.
         /// </summary>
-        /// <param name="tracks">The list of tracks to generate the session description for.</param>
+        /// <param name="mediaStreamList">The list of tracks to generate the session description for.</param>
         /// <param name="connectionAddress">Optional. If set this address will be used as 
         /// the SDP Connection address. If not specified the Internet facing address will
         /// be used. IPAddress.Any and IPAddress. Any and IPv6Any are special cases. If they are set the respective
@@ -1612,10 +1981,12 @@ namespace SIPSorcery.Net
                             {
                                 // If the remote party has set an inactive media stream via the connection address then we do the same.
                                 localAddress = audioStream.DestinationEndPoint.Address;
+                                break;
                             }
                             else
                             {
                                 localAddress = NetServices.GetLocalAddressForRemote(audioStream.DestinationEndPoint.Address);
+                                break;
                             }
                         }
                     }
@@ -1630,10 +2001,33 @@ namespace SIPSorcery.Net
                                 {
                                     // If the remote party has set an inactive media stream via the connection address then we do the same.
                                     localAddress = videoStream.DestinationEndPoint.Address;
+                                    break;
                                 }
                                 else
                                 {
                                     localAddress = NetServices.GetLocalAddressForRemote(videoStream.DestinationEndPoint.Address);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    if (localAddress == null)
+                    {
+                        foreach (var textStream in TextStreamList)
+                        {
+                            if (textStream.DestinationEndPoint != null && textStream.DestinationEndPoint.Address != null)
+                            {
+                                if (IPAddress.Any.Equals(textStream.DestinationEndPoint.Address) || IPAddress.IPv6Any.Equals(textStream.DestinationEndPoint.Address))
+                                {
+                                    // If the remote party has set an inactive media stream via the connection address then we do the same.
+                                    localAddress = textStream.DestinationEndPoint.Address;
+                                    break;
+                                }
+                                else
+                                {
+                                    localAddress = NetServices.GetLocalAddressForRemote(textStream.DestinationEndPoint.Address);
+                                    break;
                                 }
                             }
                         }
@@ -1663,6 +2057,7 @@ namespace SIPSorcery.Net
             int mediaIndex = 0;
             int audioMediaIndex = 0;
             int videoMediaIndex = 0;
+            int textMediaIndex = 0;
 
             foreach (var mediaStream in mediaStreamList)
             {
@@ -1686,6 +2081,11 @@ namespace SIPSorcery.Net
                         (mindex, midTag) = RemoteDescription.GetIndexForMediaType(mediaStream.LocalTrack.Kind, videoMediaIndex);
                         videoMediaIndex++;
                     }
+                    else if (mediaStream.LocalTrack.Kind == SDPMediaTypesEnum.text)
+                    {
+                        (mindex, midTag) = RemoteDescription.GetIndexForMediaType(mediaStream.LocalTrack.Kind, textMediaIndex);
+                        textMediaIndex++;
+                    }
                 }
                 mediaIndex++;
 
@@ -1694,13 +2094,13 @@ namespace SIPSorcery.Net
                 {
                     if (rtpSessionConfig.IsMediaMultiplexed)
                     {
-                        rtpPort = m_primaryStream.GetRTPChannel().RTPPort;
+                        rtpPort = m_primaryStream.GetRtpPortForSessionDescription();
                     }
-                    else
+                    else if (mediaStream.HasRtpChannel())
                     {
-                        rtpPort = mediaStream.GetRTPChannel().RTPPort;
+                        // If media stream does not have a Rtp channel it means this media type is not supported and rtpPort will remain zero.
+                        rtpPort = mediaStream.GetRtpPortForSessionDescription();
                     }
-
                 }
 
                 SDPMediaAnnouncement announcement = new SDPMediaAnnouncement(mediaStream.LocalTrack.Kind, rtpPort, mediaStream.LocalTrack.Capabilities);
@@ -1734,19 +2134,19 @@ namespace SIPSorcery.Net
                     {
                         if (srtpHandler.LocalSecurityDescription == null)
                         {
-                           // first time security negotiation in SDP offer
-                           uint tag = 1;
-                           foreach (SDPSecurityDescription.CryptoSuites cryptoSuite in SrtpCryptoSuites)
-                           {
-                               announcement.SecurityDescriptions.Add(SDPSecurityDescription.CreateNew(tag, cryptoSuite));
-                               tag++;
-                           }
-                           
-                           srtpHandler.SetupLocal(announcement.SecurityDescriptions, sdpType);
+                            // first time security negotiation in SDP offer
+                            uint tag = 1;
+                            foreach (SDPSecurityDescription.CryptoSuites cryptoSuite in SrtpCryptoSuites)
+                            {
+                                announcement.SecurityDescriptions.Add(SDPSecurityDescription.CreateNew(tag, cryptoSuite));
+                                tag++;
+                            }
+
+                            srtpHandler.SetupLocal(announcement.SecurityDescriptions, sdpType);
                         }
                         else
                         {
-                           // reuse negotiated security in SDP offer
+                            // reuse negotiated security in SDP offer
                             announcement.SecurityDescriptions.Add(srtpHandler.LocalSecurityDescription);
                         }
                     }
@@ -1754,32 +2154,32 @@ namespace SIPSorcery.Net
                     {
                         if (srtpHandler.LocalSecurityDescription != null)
                         {
-                           // try to reuse security negotiation in SDP answer
-                           var sec = RemoteDescription?.Media.FirstOrDefault(a => a.MLineIndex == mindex)?.SecurityDescriptions
-                                                         .FirstOrDefault(s => s.Tag == srtpHandler.LocalSecurityDescription.Tag && s.CryptoSuite == srtpHandler.LocalSecurityDescription.CryptoSuite);
-                           if (sec == null)
-                           {
-                              throw new ApplicationException("Error reusing crypto attribute for SDP answer. No compatible offer.");
-                           }
-                           else
-                           { 
-                              announcement.SecurityDescriptions.Add(srtpHandler.LocalSecurityDescription);
-                           }
+                            // try to reuse security negotiation in SDP answer
+                            var sec = RemoteDescription?.Media.FirstOrDefault(a => a.MLineIndex == mindex)?.SecurityDescriptions
+                                                          .FirstOrDefault(s => s.Tag == srtpHandler.LocalSecurityDescription.Tag && s.CryptoSuite == srtpHandler.LocalSecurityDescription.CryptoSuite);
+                            if (sec == null)
+                            {
+                                throw new ApplicationException("Error reusing crypto attribute for SDP answer. No compatible offer.");
+                            }
+                            else
+                            {
+                                announcement.SecurityDescriptions.Add(srtpHandler.LocalSecurityDescription);
+                            }
                         }
                         else
                         {
-                           // first time security negotiation in SDP answer
-                           var sec = RemoteDescription?.Media.FirstOrDefault(a => a.MLineIndex == mindex)?.SecurityDescriptions
-                                                             .FirstOrDefault(s => SrtpCryptoSuites.Contains(s.CryptoSuite));
-                           if (sec == null)
-                           {
-                              throw new ApplicationException("Error creating crypto attribute for SDP answer. No compatible offer.");
-                           }
-                           else
-                           {
-                              announcement.SecurityDescriptions.Add(SDPSecurityDescription.CreateNew(sec.Tag, sec.CryptoSuite));
-                              srtpHandler.SetupLocal(announcement.SecurityDescriptions, sdpType);
-                           }
+                            // first time security negotiation in SDP answer
+                            var sec = RemoteDescription?.Media.FirstOrDefault(a => a.MLineIndex == mindex)?.SecurityDescriptions
+                                                              .FirstOrDefault(s => SrtpCryptoSuites.Contains(s.CryptoSuite));
+                            if (sec == null)
+                            {
+                                throw new ApplicationException("Error creating crypto attribute for SDP answer. No compatible offer.");
+                            }
+                            else
+                            {
+                                announcement.SecurityDescriptions.Add(SDPSecurityDescription.CreateNew(sec.Tag, sec.CryptoSuite));
+                                srtpHandler.SetupLocal(announcement.SecurityDescriptions, sdpType);
+                            }
                         }
                     }
 
@@ -1799,7 +2199,6 @@ namespace SIPSorcery.Net
         /// Creates a new RTP channel (which manages the UDP socket sending and receiving RTP
         /// packets) for use with this session.
         /// </summary>
-        /// <param name="mediaType">The type of media the RTP channel is for. Must be audio or video.</param>
         /// <returns>A new RTPChannel instance.</returns>
         protected virtual RTPChannel CreateRtpChannel()
         {
@@ -1812,7 +2211,7 @@ namespace SIPSorcery.Net
             }
 
             // If RTCP is multiplexed we don't need a control socket.
-            int bindPort = (rtpSessionConfig.BindPort == 0) ? 0 : rtpSessionConfig.BindPort + m_rtpChannelsCount * 2;
+            int bindPort = (rtpSessionConfig.BindPort == 0) ? 0 : rtpSessionConfig.BindPort + m_rtpChannelsCount;
             var rtpChannel = new RTPChannel(!rtpSessionConfig.IsRtcpMultiplexed, rtpSessionConfig.BindAddress, bindPort, rtpSessionConfig.RtpPortRange);
 
 
@@ -1828,7 +2227,6 @@ namespace SIPSorcery.Net
             // Start the RTP, and if required the Control, socket receivers and the RTCP session.
             rtpChannel.Start();
 
-
             m_rtpChannelsCount++;
 
             return rtpChannel;
@@ -1841,7 +2239,6 @@ namespace SIPSorcery.Net
         /// <returns>A list of the local tracks that have been added to this session.</returns>
         protected List<MediaStream> GetMediaStreams()
         {
-
             List<MediaStream> mediaStream = new List<MediaStream>();
 
             foreach (var audioStream in AudioStreamList)
@@ -1872,6 +2269,20 @@ namespace SIPSorcery.Net
                 }
             }
 
+            foreach (var textstram in TextStreamList)
+            {
+                if (textstram.LocalTrack != null)
+                {
+                    mediaStream.Add(textstram);
+                }
+                else if (textstram.RtcpSession != null && !textstram.RtcpSession.IsClosed && textstram.RemoteTrack != null)
+                {
+                    var inactiveTextTrack = new MediaStreamTrack(textstram.MediaType, false, textstram.RemoteTrack.Capabilities, MediaStreamStatusEnum.Inactive);
+                    textstram.LocalTrack = inactiveTextTrack;
+                    mediaStream.Add(textstram);
+                }
+            }
+
             return mediaStream;
         }
 
@@ -1880,11 +2291,8 @@ namespace SIPSorcery.Net
         /// </summary>
         public virtual Task Start()
         {
-            if (!IsStarted)
+            if (!IsAudioStarted)
             {
-                IsStarted = true;
-
-
                 foreach (var audioStream in AudioStreamList)
                 {
                     if (audioStream.HasAudio && audioStream.RtcpSession != null && audioStream.LocalTrack.StreamStatus != MediaStreamStatusEnum.Inactive)
@@ -1892,9 +2300,13 @@ namespace SIPSorcery.Net
                         // The local audio track may have been disabled if there were no matching capabilities with
                         // the remote party.
                         audioStream.RtcpSession.Start();
+                        IsAudioStarted = true;
                     }
                 }
+            }
 
+            if (!IsVideoStarted)
+            {
                 foreach (var videoStream in VideoStreamList)
                 {
                     if (videoStream.HasVideo && videoStream.RtcpSession != null && videoStream.LocalTrack.StreamStatus != MediaStreamStatusEnum.Inactive)
@@ -1902,12 +2314,26 @@ namespace SIPSorcery.Net
                         // The local video track may have been disabled if there were no matching capabilities with
                         // the remote party.
                         videoStream.RtcpSession.Start();
+                        IsVideoStarted = true;
                     }
                 }
-
-                OnStarted?.Invoke();
             }
 
+            if (!IsTextStarted)
+            {
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream.HasText && textStream.RtcpSession != null && textStream.LocalTrack.StreamStatus != MediaStreamStatusEnum.Inactive)
+                    {
+                        // The local video track may have been disabled if there were no matching capabilities with
+                        // the remote party.
+                        textStream.RtcpSession.Start();
+                        IsTextStarted = true;
+                    }
+                }
+            }
+
+            OnStarted?.Invoke();
             return Task.CompletedTask;
         }
 
@@ -1919,6 +2345,8 @@ namespace SIPSorcery.Net
         /// <param name="sample">The audio sample to set as the RTP packet payload.</param>
         public void SendAudio(uint durationRtpUnits, byte[] sample)
         {
+            //logger.LogTrace("SendAudio: durationRtpUnits={DurationRtpUnits}, sample size={Sample}", durationRtpUnits, sample?.Length);
+
             AudioStream?.SendAudio(durationRtpUnits, sample);
         }
 
@@ -1934,7 +2362,16 @@ namespace SIPSorcery.Net
         }
 
         /// <summary>
-        /// Sends a DTMF toneas an RTP event to the remote party. (on the primary one)
+        /// Sends a text sample to the remote peer. (on the primary one)
+        /// </summary>
+        /// <param name="sample">The text sample to set as the RTP packet payload.</param>
+        public void SendText(byte[] sample)
+        {
+            TextStream?.SendText(sample);
+        }
+
+        /// <summary>
+        /// Sends a DTMF tone as an RTP event to the remote party. (on the primary one)
         /// </summary>
         /// <param name="key">The DTMF tone to send.</param>
         /// <param name="ct">RTP events can span multiple RTP packets. This token can
@@ -1958,22 +2395,11 @@ namespace SIPSorcery.Net
             {
                 IsClosed = true;
 
-
                 foreach (var audioStream in AudioStreamList)
                 {
                     if (audioStream != null)
                     {
-                        audioStream.IsClosed = true;
-                        CloseRtcpSession(audioStream, reason);
-
-                        if (audioStream.HasRtpChannel())
-                        {
-                            var rtpChannel = audioStream.GetRTPChannel();
-                            rtpChannel.OnRTPDataReceived -= OnReceive;
-                            rtpChannel.OnControlDataReceived -= OnReceive;
-                            rtpChannel.OnClosed -= OnRTPChannelClosed;
-                            rtpChannel.Close(reason);
-                        }
+                        CloseMediaStream(reason, audioStream);
                     }
                 }
 
@@ -1981,17 +2407,15 @@ namespace SIPSorcery.Net
                 {
                     if (videoStream != null)
                     {
-                        videoStream.IsClosed = true;
-                        CloseRtcpSession(videoStream, reason);
+                        CloseMediaStream(reason, videoStream);
+                    }
+                }
 
-                        if (videoStream.HasRtpChannel())
-                        {
-                            var rtpChannel = videoStream.GetRTPChannel();
-                            rtpChannel.OnRTPDataReceived -= OnReceive;
-                            rtpChannel.OnControlDataReceived -= OnReceive;
-                            rtpChannel.OnClosed -= OnRTPChannelClosed;
-                            rtpChannel.Close(reason);
-                        }
+                foreach (var textStream in TextStreamList)
+                {
+                    if (textStream != null)
+                    {
+                        CloseMediaStream(reason, textStream);
                     }
                 }
 
@@ -2000,8 +2424,25 @@ namespace SIPSorcery.Net
             }
         }
 
+        private void CloseMediaStream(string reason, MediaStream mediaStream)
+        {
+            mediaStream.IsClosed = true;
+            CloseRtcpSession(mediaStream, reason);
+
+            if (mediaStream.HasRtpChannel())
+            {
+                var rtpChannel = mediaStream.GetRTPChannel();
+                rtpChannel.OnRTPDataReceived -= OnReceive;
+                rtpChannel.OnControlDataReceived -= OnReceive;
+                rtpChannel.OnClosed -= OnRTPChannelClosed;
+                rtpChannel.Close(reason);
+            }
+        }
+
         protected void OnReceive(int localPort, IPEndPoint remoteEndPoint, byte[] buffer)
         {
+            //logger.LogDebug("RTP Session OnReceive from {RemoteEndPoint} {length} bytes buffer[0]={zeroByte}.", remoteEndPoint, buffer.Length, buffer[0]);
+
             if (remoteEndPoint.Address.IsIPv4MappedToIPv6)
             {
                 // Required for matching existing RTP end points (typically set from SDP) and
@@ -2041,43 +2482,32 @@ namespace SIPSorcery.Net
 
         private void OnReceiveRTCPPacket(int localPort, IPEndPoint remoteEndPoint, byte[] buffer)
         {
-            //logger.LogDebug($"RTCP packet received from {remoteEndPoint} {buffer.HexStr()}");
+            logger.LogDebug("RTCP packet received from {RemoteEndPoint} {Buffer}", remoteEndPoint, buffer.HexStr());
 
             #region RTCP packet.
 
             // Get the SSRC in order to be able to figure out which media type 
             // This will let us choose the apropriate unprotect methods
-            uint ssrc;
-            if (BitConverter.IsLittleEndian)
-            {
-                ssrc = NetConvert.DoReverseEndian(BitConverter.ToUInt32(buffer, 4));
-            }
-            else
-            {
-                ssrc = BitConverter.ToUInt32(buffer, 4);
-            }
+
+            uint rawSsrc = BitConverter.ToUInt32(buffer, 4);
+            uint ssrc = BitConverter.IsLittleEndian ? NetConvert.DoReverseEndian(rawSsrc) : rawSsrc;
+
 
             MediaStream mediaStream = GetMediaStream(ssrc);
-            if (mediaStream != null)
+            var secureContext = mediaStream?.GetSecurityContext() ?? PrimaryStream?.GetSecurityContext();
+
+            if (secureContext != null)
             {
-                var secureContext = mediaStream.GetSecurityContext();
-                if (secureContext != null)
+                int res = secureContext.UnprotectRtcpPacket(buffer, buffer.Length, out int outBufLen);
+                if (res != 0)
                 {
-                    int res = secureContext.UnprotectRtcpPacket(buffer, buffer.Length, out int outBufLen);
-                    if (res != 0)
-                    {
-                        logger.LogWarning($"SRTCP unprotect failed for {mediaStream.MediaType} track, result {res}.");
-                        return;
-                    }
-                    else
-                    {
-                        buffer = buffer.Take(outBufLen).ToArray();
-                    }
+                    logger.LogWarning("SRTCP unprotect failed for {MediaType} track, result {Result}.", PrimaryStream.MediaType, res);
+                    return;
                 }
-            }
-            else
-            {
-                logger.LogWarning($"Could not find appropriate remote track for SSRC for RTCP packet - Ssrc:{ssrc}");
+                else
+                {
+                    buffer = buffer.Take(outBufLen).ToArray();
+                }
             }
 
             var rtcpPkt = new RTCPCompoundPacket(buffer);
@@ -2086,7 +2516,7 @@ namespace SIPSorcery.Net
                 mediaStream = GetMediaStream(rtcpPkt);
                 if (rtcpPkt.Bye != null)
                 {
-                    logger.LogDebug($"RTCP BYE received for SSRC {rtcpPkt.Bye.SSRC}, reason {rtcpPkt.Bye.Reason}.");
+                    logger.LogDebug("RTCP BYE received for SSRC {SSRC}, reason {Reason}.", rtcpPkt.Bye.SSRC, rtcpPkt.Bye.Reason);
 
                     // In some cases, such as a SIP re-INVITE, it's possible the RTP session
                     // will keep going with a new remote SSRC. 
@@ -2100,7 +2530,7 @@ namespace SIPSorcery.Net
                     else
                     {
                         // We close peer connection only if there is no more local/remote tracks on the primary stream
-                        if ((m_primaryStream.RemoteTrack == null) && (m_primaryStream.LocalTrack == null))
+                        if ((m_primaryStream?.RemoteTrack == null) && (m_primaryStream?.LocalTrack == null))
                         {
                             OnRtcpBye?.Invoke(rtcpPkt.Bye.Reason);
                         }
@@ -2119,7 +2549,7 @@ namespace SIPSorcery.Net
                                 !mediaStream.ControlDestinationEndPoint.Address.Equals(remoteEndPoint.Address) ||
                                 mediaStream.ControlDestinationEndPoint.Port != remoteEndPoint.Port))
                             {
-                                logger.LogDebug($"{mediaStream.MediaType} control end point switched from {mediaStream.ControlDestinationEndPoint} to {remoteEndPoint}.");
+                                logger.LogDebug("{MediaType} control end point switched from {ControlDestinationEndPoint} to {RemoteEndPoint}.", mediaStream.MediaType, mediaStream.ControlDestinationEndPoint, remoteEndPoint);
                                 mediaStream.ControlDestinationEndPoint = remoteEndPoint;
                             }
                         }
@@ -2131,7 +2561,7 @@ namespace SIPSorcery.Net
                     {
                         // Ignore for the time being. Not sure what use an empty RTCP Receiver Report can provide.
                     }
-                    else if (AudioStream?.RtcpSession?.PacketsReceivedCount > 0 || VideoStream?.RtcpSession?.PacketsReceivedCount > 0)
+                    else if (AudioStream?.RtcpSession?.PacketsReceivedCount > 0 || VideoStream?.RtcpSession?.PacketsReceivedCount > 0 || TextStream?.RtcpSession?.PacketsReceivedCount > 0)
                     {
                         // Only give this warning if we've received at least one RTP packet.
                         //logger.LogWarning("Could not match an RTCP packet against any SSRC's in the session.");
@@ -2149,62 +2579,28 @@ namespace SIPSorcery.Net
 
         private void OnReceiveRTPPacket(int localPort, IPEndPoint remoteEndPoint, byte[] buffer)
         {
+            //logger.LogDebug("RTPSession OnReceiveRTPPacket received from {RemoteEndPoint} {length} bytes.", remoteEndPoint, buffer.Length);
+
             if (!IsClosed)
             {
                 var hdr = new RTPHeader(buffer);
 
                 MediaStream mediaStream = GetMediaStream(hdr.SyncSource);
 
-                if ((mediaStream == null) && (AudioStreamList.Count < 2) && (VideoStreamList.Count < 2))
+                if ((mediaStream == null) && (AudioStreamList.Count < 2) && (VideoStreamList.Count < 2) && (TextStreamList.Count < 2))
                 {
                     mediaStream = GetMediaStreamFromPayloadType(hdr.PayloadType);
                 }
 
                 if (mediaStream == null)
                 {
-                    logger.LogWarning($"An RTP packet with SSRC {hdr.SyncSource} and payload ID {hdr.PayloadType} was received that could not be matched to an audio or video stream.");
+                    logger.LogWarning("An RTP packet with SSRC {SyncSource} and payload ID {PayloadType} was received that could not be matched to an audio or video stream.", hdr.SyncSource, hdr.PayloadType);
                     return;
                 }
 
                 hdr.ReceivedTime = DateTime.Now;
-                if (mediaStream.MediaType == SDPMediaTypesEnum.audio)
-                {
-                    mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer, null);
-                }
-                else if (mediaStream.MediaType == SDPMediaTypesEnum.video)
-                {
-                    mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer, mediaStream as VideoStream);
-                }
+                mediaStream.OnReceiveRTPPacket(hdr, localPort, remoteEndPoint, buffer);
             }
-        }
-
-        private MediaStreamTrack GetMediaStreamTrackFromPayloadType(int payloadId)
-        {
-            foreach (var audioStream in AudioStreamList)
-            {
-                if (audioStream.RemoteTrack != null && audioStream.RemoteTrack.IsPayloadIDMatch(payloadId))
-                {
-                    return audioStream.RemoteTrack;
-                }
-                else if (audioStream.LocalTrack != null && audioStream.LocalTrack.IsPayloadIDMatch(payloadId))
-                {
-                    return audioStream.LocalTrack;
-                }
-            }
-
-            foreach (var videoStream in VideoStreamList)
-            {
-                if (videoStream.RemoteTrack != null && videoStream.RemoteTrack.IsPayloadIDMatch(payloadId))
-                {
-                    return videoStream.RemoteTrack;
-                }
-                else if (videoStream.LocalTrack != null && videoStream.LocalTrack.IsPayloadIDMatch(payloadId))
-                {
-                    return videoStream.LocalTrack;
-                }
-            }
-
-            return null;
         }
 
         private MediaStream GetMediaStreamFromPayloadType(int payloadId)
@@ -2230,6 +2626,18 @@ namespace SIPSorcery.Net
                 else if (videoStream.LocalTrack != null && videoStream.LocalTrack.IsPayloadIDMatch(payloadId))
                 {
                     return videoStream;
+                }
+            }
+
+            foreach (var textStream in TextStreamList)
+            {
+                if (textStream.RemoteTrack != null && textStream.RemoteTrack.IsPayloadIDMatch(payloadId))
+                {
+                    return textStream;
+                }
+                else if (textStream.LocalTrack != null && textStream.LocalTrack.IsPayloadIDMatch(payloadId))
+                {
+                    return textStream;
                 }
             }
 
@@ -2262,95 +2670,16 @@ namespace SIPSorcery.Net
                 }
             }
 
-            var stream = GetMediaStreamRemoteSDPSsrcAttributes(ssrc);
-            if (stream != null)
+            foreach (var textStream in TextStreamList)
             {
-                return stream;
-            }
-
-            if (HasAudio)
-            {
-                if (!HasVideo)
+                if (textStream?.RemoteTrack?.IsSsrcMatch(ssrc) == true)
                 {
-                    return AudioStream;
+                    return textStream;
                 }
-            }
-            else
-            {
-                if (HasVideo)
+                else if (textStream?.LocalTrack?.IsSsrcMatch(ssrc) == true)
                 {
-                    return VideoStream;
+                    return textStream;
                 }
-            }
-
-            return null;
-        }
-
-        private MediaStream GetMediaStreamRemoteSDPSsrcAttributes(uint ssrc)
-        {
-            if (ssrc < 200)
-            {
-                return null;
-            }
-
-            bool found = false;
-            int index;
-
-            // Loop au audioRemoteSDPSsrcAttributes 
-            for (index = 0; index < audioRemoteSDPSsrcAttributes.Count; index++)
-            {
-                foreach (var ssrcAttributes in audioRemoteSDPSsrcAttributes[index])
-                {
-                    if (ssrcAttributes.SSRC == ssrc)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                {
-                    break;
-                }
-            }
-
-            // Get related AudioStream if found
-            if (found && (AudioStreamList.Count > index))
-            {
-                var audioStream = AudioStreamList[index];
-                //if (audioStream?.RemoteTrack != null)
-                //{
-                //    audioStream.RemoteTrack.Ssrc = ssrc;
-                //}
-                return audioStream;
-            }
-
-            // Loop au videoRemoteSDPSsrcAttributes 
-            found = false;
-            for (index = 0; index < videoRemoteSDPSsrcAttributes.Count; index++)
-            {
-                foreach (var ssrcAttributes in videoRemoteSDPSsrcAttributes[index])
-                {
-                    if (ssrcAttributes.SSRC == ssrc)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                {
-                    break;
-                }
-            }
-
-            // Get related VideoStreamList if found
-            if (found && (VideoStreamList.Count > index))
-            {
-                var videoStream = VideoStreamList[index];
-                //if (videoStream?.RemoteTrack != null)
-                //{
-                //    videoStream.RemoteTrack.Ssrc = ssrc;
-                //}
-                return videoStream;
             }
 
             return null;
@@ -2374,6 +2703,10 @@ namespace SIPSorcery.Net
             else if (rtcpPkt.Feedback != null)
             {
                 return GetMediaStream(rtcpPkt.Feedback.SenderSSRC);
+            }
+            else if (rtcpPkt.TWCCFeedback != null)
+            {
+                return GetMediaStream(rtcpPkt.TWCCFeedback.MediaSSRC);
             }
 
             // No match on SR/RR SSRC. Check the individual reception reports for a known SSRC.
@@ -2422,6 +2755,10 @@ namespace SIPSorcery.Net
             {
                 VideoStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID, seqNum);
             }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID, seqNum);
+            }
         }
 
         /// <summary>
@@ -2442,7 +2779,12 @@ namespace SIPSorcery.Net
             {
                 VideoStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID);
             }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtpRaw(payload, timestamp, markerBit, payloadTypeID);
+            }
         }
+
         /// <summary>
         /// Allows additional control for sending raw RTCP payloads (on the primary one).
         /// </summary>
@@ -2457,6 +2799,10 @@ namespace SIPSorcery.Net
             else if (mediaType == SDPMediaTypesEnum.video)
             {
                 VideoStream?.SendRtcpRaw(payload);
+            }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtcpRaw(payload);
             }
         }
 
@@ -2482,6 +2828,10 @@ namespace SIPSorcery.Net
                 {
                     VideoStream?.SetDestination(rtpEndPoint, rtcpEndPoint);
                 }
+                else if (mediaType == SDPMediaTypesEnum.text)
+                {
+                    TextStream?.SetDestination(rtpEndPoint, rtcpEndPoint);
+                }
             }
         }
 
@@ -2500,6 +2850,31 @@ namespace SIPSorcery.Net
             {
                 VideoStream?.SendRtcpFeedback(feedback);
             }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtcpFeedback(feedback);
+            }
+        }
+
+        /// <summary>
+        /// Allows sending of RTCP TWCC feedback reports (on the primary one)
+        /// </summary>
+        /// <param name="mediaType">The media type of the RTCP report  being sent. Must be audio or video.</param>
+        /// <param name="feedback">The feedback report to send.</param>
+        public void SendRtcpTWCCFeedback(SDPMediaTypesEnum mediaType, RTCPTWCCFeedback feedback)
+        {
+            if (mediaType == SDPMediaTypesEnum.audio)
+            {
+                AudioStream.SendRtcpTWCCFeedback(feedback);
+            }
+            else if (mediaType == SDPMediaTypesEnum.video)
+            {
+                VideoStream?.SendRtcpTWCCFeedback(feedback);
+            }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtcpTWCCFeedback(feedback);
+            }
         }
 
         /// <summary>
@@ -2515,6 +2890,10 @@ namespace SIPSorcery.Net
             else if (mediaType == SDPMediaTypesEnum.video)
             {
                 VideoStream?.SendRtcpReport(report);
+            }
+            else if (mediaType == SDPMediaTypesEnum.text)
+            {
+                TextStream?.SendRtcpReport(report);
             }
         }
 
